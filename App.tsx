@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -11,18 +11,19 @@ import {
   View,
   Platform,
   PermissionsAndroid,
+  ActivityIndicator,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
-import { useKeepAwake } from 'expo-keep-awake';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 
 // 类型定义
-interface SnoreEvent {
+interface SoundEvent {
   start: number; // 相对会话开始的毫秒数
   end: number;
   duration: number; // 毫秒
+  type: 'snore' | 'grind'; // 打鼾 | 磨牙
 }
 
 interface SleepSession {
@@ -30,9 +31,11 @@ interface SleepSession {
   startTime: number;
   endTime?: number;
   durationSeconds: number;
-  snoreEvents: SnoreEvent[];
-  totalSnoreSeconds: number;
+  events: SoundEvent[];
   snoreCount: number;
+  grindCount: number;
+  totalSnoreSeconds: number;
+  totalGrindSeconds: number;
   recordingUri?: string;
   qualityScore: number; // 0-100
 }
@@ -40,12 +43,14 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const STORAGE_KEY = '@snore_sessions_v1';
-const SETTINGS_KEY = '@snore_settings_v1';
+const STORAGE_KEY = '@snore_sessions_v2';
+const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 500; // 监测循环周期
-const DEFAULT_THRESHOLD_DB = -30; // 默认打鼾音量阈值 (dBFS)
-const MIN_Snore_DURATION_MS = 1500; // 最小算作一次打鼾的持续时间
-const COOLDOWN_MS = 800; // 两次打鼾事件之间的最小间隔
+const DEFAULT_THRESHOLD_DB = -30; // 默认音量阈值 (dBFS)
+const MIN_SNORE_MS = 1500; // 最小打鼾持续时间
+const MAX_GRIND_MS = 1200; // 最大磨牙持续时间
+const MIN_GRIND_MS = 120; // 最小磨牙持续时间
+const COOLDOWN_MS = 800; // 事件冷却间隔
 
 // 辅助函数
 function formatDuration(totalSeconds: number): string {
@@ -60,10 +65,9 @@ function formatTime(ts: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
-function calculateQualityScore(sleepSeconds: number, snoreSeconds: number): number {
+function calculateQualityScore(sleepSeconds: number, noiseSeconds: number): number {
   if (sleepSeconds <= 0) return 100;
-  const ratio = snoreSeconds / sleepSeconds;
-  // 打鼾时间占比越高，分数越低
+  const ratio = noiseSeconds / sleepSeconds;
   let score = Math.max(0, Math.min(100, Math.round(100 - ratio * 300)));
   if (score >= 90) score = 100;
   else if (score >= 75) score = 85;
@@ -84,28 +88,28 @@ export default function App() {
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [snoreCount, setSnoreCount] = useState(0);
-  const [totalSnoreSeconds, setTotalSnoreSeconds] = useState(0);
-  const [currentRecordingUri, setCurrentRecordingUri] = useState<string | null>(null);
+  const [grindCount, setGrindCount] = useState(0);
+  const [totalNoiseSeconds, setTotalNoiseSeconds] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isReady, setIsReady] = useState(false);
 
   const recordingRef = useRef<Audio.Recording | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const monitorTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const eventsRef = useRef<SnoreEvent[]>([]);
-  const currentEventRef = useRef<SnoreEvent | null>(null);
-  const lastSnoreEndRef = useRef<number>(0);
+  const eventsRef = useRef<SoundEvent[]>([]);
+  const currentEventRef = useRef<SoundEvent | null>(null);
+  const lastEventEndRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
-
-  useKeepAwake();
 
   // 加载设置与历史
   useEffect(() => {
+    let mounted = true;
     (async () => {
       try {
         const settingsRaw = await AsyncStorage.getItem(SETTINGS_KEY);
         if (settingsRaw) {
           const settings = JSON.parse(settingsRaw);
-          if (typeof settings.thresholdDb === 'number') {
+          if (typeof settings.thresholdDb === 'number' && mounted) {
             setThresholdDb(settings.thresholdDb);
           }
         }
@@ -113,8 +117,13 @@ export default function App() {
         console.warn('加载设置失败', e);
       }
       await loadSessions();
-      await checkPermission();
+      const permitted = await checkPermission();
+      if (mounted) {
+        setHasPermission(permitted);
+        setIsReady(true);
+      }
     })();
+    return () => { mounted = false; };
   }, []);
 
   const loadSessions = async () => {
@@ -138,22 +147,27 @@ export default function App() {
     }
   };
 
-  const checkPermission = async () => {
-    if (Platform.OS === 'android') {
-      const granted = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO!,
-        {
-          title: '需要录音权限',
-          message: '睡眠监测需要访问麦克风以录制鼾声和环境音。',
-          buttonNeutral: '稍后询问',
-          buttonNegative: '取消',
-          buttonPositive: '允许',
-        }
-      );
-      setHasPermission(granted === PermissionsAndroid.RESULTS.GRANTED);
-    } else {
-      const { status } = await Audio.requestPermissionsAsync();
-      setHasPermission(status === 'granted');
+  const checkPermission = async (): Promise<boolean> => {
+    try {
+      if (Platform.OS === 'android') {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO!,
+          {
+            title: '需要录音权限',
+            message: '睡眠监测需要访问麦克风以录制鼾声、磨牙等声音。',
+            buttonNeutral: '稍后询问',
+            buttonNegative: '取消',
+            buttonPositive: '允许',
+          }
+        );
+        return result === PermissionsAndroid.RESULTS.GRANTED;
+      } else {
+        const { status } = await Audio.requestPermissionsAsync();
+        return status === 'granted';
+      }
+    } catch (e) {
+      console.error('权限检查失败', e);
+      return false;
     }
   };
 
@@ -174,19 +188,19 @@ export default function App() {
   };
 
   const startMonitoring = async () => {
-    if (!hasPermission) {
-      Alert.alert('需要麦克风权限', '请先授予录音权限后再开始监测。');
-      await checkPermission();
+    const permitted = await checkPermission();
+    setHasPermission(permitted);
+    if (!permitted) {
+      Alert.alert('需要麦克风权限', '请在系统设置中允许本应用使用麦克风，否则无法录音。');
       return;
     }
 
-    await setupAudioMode();
-
     try {
+      await setupAudioMode();
       const { recording } = await Audio.Recording.createAsync(
         Audio.RecordingOptionsPresets.HIGH_QUALITY,
         undefined,
-        250 // 每 250ms 上报一次状态，用于实时音量
+        250
       );
       recordingRef.current = recording;
 
@@ -194,17 +208,19 @@ export default function App() {
       setSleepStartTime(startTimeRef.current);
       setElapsedSeconds(0);
       setSnoreCount(0);
-      setTotalSnoreSeconds(0);
+      setGrindCount(0);
+      setTotalNoiseSeconds(0);
       setIsMonitoring(true);
       setVolumeDb(-100);
       eventsRef.current = [];
       currentEventRef.current = null;
-      lastSnoreEndRef.current = 0;
+      lastEventEndRef.current = 0;
 
       monitorTimerRef.current = setInterval(monitorLoop, CHUNK_MS);
     } catch (e) {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
+      setIsMonitoring(false);
     }
   };
 
@@ -225,11 +241,11 @@ export default function App() {
 
       if (isLoud) {
         if (!currentEventRef.current) {
-          // 开始新的潜在打鼾事件
           currentEventRef.current = {
             start: sessionElapsed,
             end: sessionElapsed,
             duration: 0,
+            type: 'snore',
           };
         } else {
           currentEventRef.current.end = sessionElapsed;
@@ -237,20 +253,24 @@ export default function App() {
         }
       } else {
         const evt = currentEventRef.current;
-        if (evt && evt.duration >= MIN_Snore_DURATION_MS) {
-          if (sessionElapsed - lastSnoreEndRef.current >= COOLDOWN_MS) {
+        if (evt && sessionElapsed - lastEventEndRef.current >= COOLDOWN_MS) {
+          if (evt.duration >= MIN_SNORE_MS) {
+            evt.type = 'snore';
             eventsRef.current.push({ ...evt });
-            lastSnoreEndRef.current = evt.end;
-            setSnoreCount(eventsRef.current.length);
+            setSnoreCount((c) => c + 1);
+          } else if (evt.duration >= MIN_GRIND_MS && evt.duration <= MAX_GRIND_MS) {
+            evt.type = 'grind';
+            eventsRef.current.push({ ...evt });
+            setGrindCount((c) => c + 1);
           }
+          lastEventEndRef.current = evt.end;
         }
         currentEventRef.current = null;
       }
 
-      // 累计打鼾秒数（包含当前进行中的事件）
       const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
       const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
-      setTotalSnoreSeconds(Math.floor((finished + ongoing) / 1000));
+      setTotalNoiseSeconds(Math.floor((finished + ongoing) / 1000));
     } catch (e) {
       console.warn('监测循环异常', e);
     }
@@ -267,32 +287,40 @@ export default function App() {
       try {
         await recording.stopAndUnloadAsync();
         const uri = recording.getURI();
-        setCurrentRecordingUri(uri);
 
         const endTime = Date.now();
         const durationSeconds = Math.max(1, Math.floor((endTime - startTimeRef.current) / 1000));
 
         // 收尾当前事件
         const evt = currentEventRef.current;
-        if (evt && evt.duration >= MIN_Snore_DURATION_MS) {
-          if ((evt.end - lastSnoreEndRef.current) >= COOLDOWN_MS) {
+        if (evt && (endTime - startTimeRef.current) - lastEventEndRef.current >= COOLDOWN_MS) {
+          if (evt.duration >= MIN_SNORE_MS) {
+            evt.type = 'snore';
+            eventsRef.current.push({ ...evt });
+          } else if (evt.duration >= MIN_GRIND_MS && evt.duration <= MAX_GRIND_MS) {
+            evt.type = 'grind';
             eventsRef.current.push({ ...evt });
           }
         }
 
-        const totalSnoreMs = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
-        const totalSnoreSec = Math.floor(totalSnoreMs / 1000);
+        const snoreEvents = eventsRef.current.filter((e) => e.type === 'snore');
+        const grindEvents = eventsRef.current.filter((e) => e.type === 'grind');
+        const totalSnoreMs = snoreEvents.reduce((sum, e) => sum + e.duration, 0);
+        const totalGrindMs = grindEvents.reduce((sum, e) => sum + e.duration, 0);
+        const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs) / 1000);
 
         const session: SleepSession = {
           id: `${startTimeRef.current}`,
           startTime: startTimeRef.current,
           endTime,
           durationSeconds,
-          snoreEvents: eventsRef.current,
-          totalSnoreSeconds: totalSnoreSec,
-          snoreCount: eventsRef.current.length,
+          events: eventsRef.current,
+          snoreCount: snoreEvents.length,
+          grindCount: grindEvents.length,
+          totalSnoreSeconds: Math.floor(totalSnoreMs / 1000),
+          totalGrindSeconds: Math.floor(totalGrindMs / 1000),
           recordingUri: uri ?? undefined,
-          qualityScore: calculateQualityScore(durationSeconds, totalSnoreSec),
+          qualityScore: calculateQualityScore(durationSeconds, totalNoiseSec),
         };
 
         const updated = [session, ...sessions];
@@ -364,17 +392,26 @@ export default function App() {
     };
   }, []);
 
+  if (!isReady) {
+    return (
+      <SafeAreaView style={[styles.container, styles.center]}>
+        <ActivityIndicator size="large" color="#4ECDC4" />
+        <Text style={styles.loadingText}>正在初始化…</Text>
+      </SafeAreaView>
+    );
+  }
+
   // UI 渲染
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.homeContent}>
       <View style={styles.card}>
         <Text style={styles.title}>睡眠监测</Text>
-        <Text style={styles.subtitle}>记录睡眠时长、打鼾次数与录音</Text>
+        <Text style={styles.subtitle}>记录打鼾、磨牙与整晚录音</Text>
 
         {hasPermission === false && (
           <View style={styles.warningBox}>
             <Text style={styles.warningText}>未获得麦克风权限，无法录音。</Text>
-            <Button title="去授权" onPress={checkPermission} />
+            <Button title="去授权" onPress={async () => setHasPermission(await checkPermission())} />
           </View>
         )}
 
@@ -389,8 +426,12 @@ export default function App() {
             <Text style={styles.statLabel}>打鼾次数</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>{formatDuration(totalSnoreSeconds)}</Text>
-            <Text style={styles.statLabel}>打鼾时长</Text>
+            <Text style={styles.statValue}>{grindCount}</Text>
+            <Text style={styles.statLabel}>磨牙次数</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statValue}>{formatDuration(totalNoiseSeconds)}</Text>
+            <Text style={styles.statLabel}>异常声音时长</Text>
           </View>
         </View>
 
@@ -422,7 +463,7 @@ export default function App() {
 
         {isMonitoring && (
           <Text style={styles.tipText}>
-            监测中…屏幕会保持常亮，请将手机放在枕边并连接充电器。
+            监测中…请保持应用在屏幕上，建议连接充电器。
           </Text>
         )}
       </View>
@@ -468,7 +509,7 @@ export default function App() {
               <View>
                 <Text style={styles.historyTime}>{formatTime(item.startTime)}</Text>
                 <Text style={styles.historyMeta}>
-                  睡眠 {formatDuration(item.durationSeconds)} · 打鼾 {item.snoreCount} 次
+                  睡眠 {formatDuration(item.durationSeconds)} · 打鼾 {item.snoreCount} 次 · 磨牙 {item.grindCount} 次
                 </Text>
               </View>
               <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore) }]}>
@@ -505,8 +546,8 @@ export default function App() {
               <Text style={styles.detailStatLabel}>打鼾次数</Text>
             </View>
             <View style={styles.detailStat}>
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalSnoreSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>打鼾时长</Text>
+              <Text style={styles.detailStatValue}>{selectedSession.grindCount}</Text>
+              <Text style={styles.detailStatLabel}>磨牙次数</Text>
             </View>
           </View>
 
@@ -530,13 +571,15 @@ export default function App() {
             <Text style={styles.noRecordingText}>未保存录音</Text>
           )}
 
-          <Text style={styles.sectionTitle}>打鼾事件</Text>
-          {selectedSession.snoreEvents.length === 0 ? (
-            <Text style={styles.noRecordingText}>未检测到打鼾事件</Text>
+          <Text style={styles.sectionTitle}>异常声音事件</Text>
+          {selectedSession.events.length === 0 ? (
+            <Text style={styles.noRecordingText}>未检测到打鼾或磨牙事件</Text>
           ) : (
-            selectedSession.snoreEvents.map((evt, idx) => (
+            selectedSession.events.map((evt, idx) => (
               <View key={idx} style={styles.eventRow}>
-                <Text style={styles.eventIndex}>#{idx + 1}</Text>
+                <Text style={[styles.eventIndex, evt.type === 'grind' ? { color: '#F1C40F' } : {}]}>
+                  #{idx + 1} {evt.type === 'snore' ? '鼾' : '磨牙'}
+                </Text>
                 <Text style={styles.eventTime}>
                   {formatDuration(Math.floor(evt.start / 1000))} - {formatDuration(Math.floor(evt.end / 1000))}
                 </Text>
@@ -579,9 +622,9 @@ export default function App() {
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>打鼾检测阈值</Text>
+        <Text style={styles.sectionTitle}>声音检测阈值</Text>
         <Text style={styles.settingsDesc}>
-          当环境音量超过该阈值并持续一段时间，会被记为一次打鼾。阈值越低越灵敏，但可能误报；阈值越高越严格。
+          当环境音量超过该阈值并持续一段时间，会被记为打鼾或磨牙。阈值越低越灵敏。磨牙声通常短促，打鼾声通常较长。
         </Text>
         <Text style={styles.thresholdValue}>{thresholdDb} dB</Text>
         <View style={styles.sliderRow}>
@@ -633,6 +676,14 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#F5F7FA',
+  },
+  center: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 16,
+    color: '#7A8B9C',
   },
   flex: {
     flex: 1,
@@ -697,7 +748,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   statValue: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '700',
     color: '#1A2B3C',
     fontVariant: ['tabular-nums'],
@@ -898,7 +949,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#E8EDF2',
   },
   eventIndex: {
-    width: 40,
+    width: 80,
     color: '#4ECDC4',
     fontWeight: '700',
   },
