@@ -33,6 +33,11 @@ jobs:
       - name: Prebuild Android
         run: npx expo prebuild --platform android
 
+      - name: Bundle JS into APK
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx react-native bundle --platform android --dev false --entry-file index.ts --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res/
+
       - name: Build Debug APK
         working-directory: ./android
         run: ./gradlew assembleDebug --no-daemon
