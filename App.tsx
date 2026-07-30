@@ -84,6 +84,7 @@ export default function App() {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [volumeDb, setVolumeDb] = useState(-100);
+  const [maxVolumeDb, setMaxVolumeDb] = useState(-100);
   const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -197,10 +198,37 @@ export default function App() {
 
     try {
       await setupAudioMode();
+      // 自定义录音选项：必须启用 isMeteringEnabled 才能获取实时音量
+      const recordingOptions: Audio.RecordingOptions = {
+        isMeteringEnabled: true,
+        android: {
+          extension: '.m4a',
+          outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+          audioEncoder: Audio.AndroidAudioEncoder.AAC,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          bitRate: 64000,
+        },
+        ios: {
+          extension: '.m4a',
+          outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
+          audioQuality: Audio.IOSAudioQuality.HIGH,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          bitRate: 64000,
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
+        web: {
+          mimeType: 'audio/webm',
+          bitsPerSecond: 64000,
+        },
+      };
       const { recording } = await Audio.Recording.createAsync(
-        Audio.RecordingOptionsPresets.HIGH_QUALITY,
+        recordingOptions,
         undefined,
-        250
+        100 // 每 100ms 更新一次状态
       );
       recordingRef.current = recording;
 
@@ -216,6 +244,8 @@ export default function App() {
       currentEventRef.current = null;
       lastEventEndRef.current = 0;
       lastLoudTimeRef.current = 0;
+      maxVolumeDbRef.current = -100;
+      setMaxVolumeDb(-100);
 
       monitorTimerRef.current = setInterval(monitorLoop, CHUNK_MS);
     } catch (e) {
@@ -226,6 +256,7 @@ export default function App() {
   };
 
   const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
+  const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
   const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
 
   const monitorLoop = async () => {
@@ -236,6 +267,10 @@ export default function App() {
       const status = await recording.getStatusAsync();
       const metering = (status as any).metering ?? -100;
       setVolumeDb(metering);
+      if (metering > maxVolumeDbRef.current) {
+        maxVolumeDbRef.current = metering;
+        setMaxVolumeDb(metering);
+      }
 
       const now = Date.now();
       const sessionElapsed = now - startTimeRef.current;
@@ -479,6 +514,9 @@ export default function App() {
               {volumeDb >= thresholdDb ? '● 超过阈值' : '○ 安静'}
             </Text>
           </View>
+          <Text style={[styles.volumeDb, { color: '#FFD93D', marginTop: 4 }]}>
+            本次最大音量: {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
+          </Text>
         </View>
 
         <TouchableOpacity
