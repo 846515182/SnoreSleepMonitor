@@ -3,19 +3,19 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
-    "@expo/metro-runtime": "~4.0.1",
+    "@expo/metro-runtime": "~3.2.3",
     "@react-native-async-storage/async-storage": "1.23.1",
-    "expo": "~52.0.46",
+    "expo": "~51.0.39",
     "expo-av": "~14.0.7",
-    "expo-file-system": "~18.0.12",
-    "expo-status-bar": "~2.0.1",
-    "react": "18.3.1",
-    "react-dom": "18.3.1",
-    "react-native": "0.76.9",
-    "react-native-web": "~0.19.13"
+    "expo-file-system": "~17.0.1",
+    "expo-status-bar": "~1.12.1",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "react-native": "0.74.7",
+    "react-native-web": "~0.19.12"
   },
   "devDependencies": {
-    "@types/react": "~18.3.12",
+    "@types/react": "~18.2.79",
     "typescript": "~5.3.3"
   },
   "scripts": {
