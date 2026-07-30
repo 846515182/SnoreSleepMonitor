@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-x86_64:
+  build-universal:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -33,23 +33,23 @@ jobs:
       - name: Prebuild Android
         run: npx expo prebuild --platform android --clean
 
-      - name: Build x86_64 debug APK
-        run: cd android && ./gradlew :app:assembleDebug -PreactNativeArchitectures=x86_64 --no-daemon
+      - name: Build universal debug APK
+        run: cd android && ./gradlew :app:assembleDebug --no-daemon
 
-      - name: Upload x86_64 APK
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-x86_64-debug
+          name: app-debug
           path: android/app/build/outputs/apk/debug/*.apk
 
   emulator-test:
-    runs-on: macos-13
-    needs: build-x86_64
+    runs-on: macos-latest
+    needs: build-universal
     steps:
-      - name: Download x86_64 APK
+      - name: Download debug APK
         uses: actions/download-artifact@v4
         with:
-          name: app-x86_64-debug
+          name: app-debug
           path: apk
 
       - name: Write test script
@@ -78,7 +78,7 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
-          arch: x86_64
+          arch: arm64-v8a
           target: google_apis
           script: ./emulator-test.sh
 
