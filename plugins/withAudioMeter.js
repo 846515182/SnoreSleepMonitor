@@ -80,7 +80,7 @@ const AUDIO_METER_PACKAGE_KT = [
   'package com.snoresleep.monitor',
   '',
   'import com.facebook.react.ReactPackage',
-  'import com.facebook.react.ReactApplicationContext',
+  'import com.facebook.react.bridge.ReactApplicationContext',
   'import com.facebook.react.bridge.NativeModule',
   'import com.facebook.react.uimanager.ViewManager',
   '',
