@@ -43,7 +43,7 @@ jobs:
           path: android/app/build/outputs/apk/debug/*.apk
 
   emulator-test:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     needs: build-x86_64
     steps:
       - name: Download x86_64 APK
@@ -52,27 +52,35 @@ jobs:
           name: app-x86_64-debug
           path: apk
 
+      - name: Write test script
+        run: |
+          cat > emulator-test.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          adb wait-for-device
+          adb install -t apk/app-debug.apk
+          adb shell pm grant com.snoresleep.monitor android.permission.RECORD_AUDIO
+          adb shell am start -n com.snoresleep.monitor/.MainActivity
+          sleep 15
+          PID=$(adb shell pidof com.snoresleep.monitor || true)
+          if [ -z "$PID" ]; then
+            echo "ERROR: com.snoresleep.monitor is not running"
+            exit 1
+          fi
+          echo "App is running, PID=$PID"
+          adb logcat -d -s AudioMeter:D > logcat.txt || true
+          adb shell screencap -p /sdcard/screen.png
+          adb pull /sdcard/screen.png screen.png
+          EOF
+          chmod +x emulator-test.sh
+
       - name: Run emulator smoke test
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
           arch: x86_64
           target: google_apis
-          script: |
-            adb wait-for-device
-            adb install -t apk/app-debug.apk
-            adb shell pm grant com.snoresleep.monitor android.permission.RECORD_AUDIO
-            adb shell am start -n com.snoresleep.monitor/.MainActivity
-            sleep 15
-            PID=$(adb shell pidof com.snoresleep.monitor || true)
-            if [ -z "$PID" ]; then
-              echo "ERROR: com.snoresleep.monitor is not running"
-              exit 1
-            fi
-            echo "App is running, PID=$PID"
-            adb logcat -d -s AudioMeter:D > logcat.txt || true
-            adb shell screencap -p /sdcard/screen.png
-            adb pull /sdcard/screen.png screen.png
+          script: ./emulator-test.sh
 
       - name: Upload logs and screenshot
         if: always()
