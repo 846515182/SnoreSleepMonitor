@@ -50,7 +50,7 @@ type Screen = 'home' | 'history' | 'detail' | 'settings';
 const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
-const DEFAULT_THRESHOLD_DB = -45; // 默认音量阈值降低，更灵敏
+const DEFAULT_THRESHOLD_DB = -60; // 默认音量阈值，-60dB 更灵敏，环境安静时约 -70~-80，打鼾约 -30~-50
 const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒即可
 const MAX_GRIND_MS = 1200; // 最大磨牙持续时间
 const MIN_GRIND_MS = 80; // 最小磨牙持续时间
@@ -109,11 +109,12 @@ export default function App() {
   const recordingUriRef = useRef<string>('');
   const useNativeMeterRef = useRef<boolean>(false);
   const soundRef = useRef<Audio.Sound | null>(null);
-  const monitorTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const monitorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventsRef = useRef<SoundEvent[]>([]);
   const currentEventRef = useRef<SoundEvent | null>(null);
   const lastEventEndRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
+  const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
 
   // 加载设置与历史
   useEffect(() => {
@@ -220,7 +221,8 @@ export default function App() {
         useNativeMeterRef.current = true;
       } else {
         useNativeMeterRef.current = false;
-        // expo-av 回退方案
+        lastMeteringRef.current = -100;
+        // expo-av 回退方案：用 onRecordingStatusUpdate 回调获取 metering（比 getStatusAsync 更可靠）
         const recordingOptions: Audio.RecordingOptions = {
           isMeteringEnabled: true,
           android: {
@@ -249,8 +251,13 @@ export default function App() {
         };
         const { recording } = await Audio.Recording.createAsync(
           recordingOptions,
-          undefined,
-          100
+          (status) => {
+            // onRecordingStatusUpdate 回调：比 getStatusAsync 更可靠地获取 metering
+            if (status.isRecording && typeof (status as any).metering === 'number') {
+              lastMeteringRef.current = (status as any).metering;
+            }
+          },
+          CHUNK_MS,
         );
         recordingRef.current = recording;
       }
@@ -270,7 +277,14 @@ export default function App() {
       maxVolumeDbRef.current = -100;
       setMaxVolumeDb(-100);
 
-      monitorTimerRef.current = setInterval(monitorLoop, CHUNK_MS);
+      // 用递归 setTimeout 替代 setInterval，避免 async monitorLoop 调用重叠
+      const runLoop = async () => {
+        await monitorLoop();
+        if (monitorTimerRef.current !== null) {
+          monitorTimerRef.current = setTimeout(runLoop, CHUNK_MS);
+        }
+      };
+      monitorTimerRef.current = setTimeout(runLoop, CHUNK_MS);
     } catch (e) {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
@@ -310,28 +324,20 @@ export default function App() {
       return;
     }
 
-    // expo-av 回退路径
-    const recording = recordingRef.current;
-    if (!recording) return;
-
-    try {
-      const status = await recording.getStatusAsync();
-      const metering = (status as any).metering ?? -100;
-      setVolumeDb(metering);
-      if (metering > maxVolumeDbRef.current) {
-        maxVolumeDbRef.current = metering;
-        setMaxVolumeDb(metering);
-      }
-
-      const now = Date.now();
-      const sessionElapsed = now - startTimeRef.current;
-      setElapsedSeconds(Math.floor(sessionElapsed / 1000));
-
-      const isLoud = metering >= thresholdDb;
-      detectEvent(isLoud, sessionElapsed);
-    } catch (e) {
-      console.warn('监测循环异常', e);
+    // expo-av 回退路径：从 onRecordingStatusUpdate 回调读取最新 metering
+    const metering = lastMeteringRef.current;
+    setVolumeDb(metering);
+    if (metering > maxVolumeDbRef.current) {
+      maxVolumeDbRef.current = metering;
+      setMaxVolumeDb(metering);
     }
+
+    const now = Date.now();
+    const sessionElapsed = now - startTimeRef.current;
+    setElapsedSeconds(Math.floor(sessionElapsed / 1000));
+
+    const isLoud = metering >= thresholdDb;
+    detectEvent(isLoud, sessionElapsed);
   };
 
   // 事件检测公共逻辑（两种路径共用）
@@ -389,7 +395,7 @@ export default function App() {
 
   const stopMonitoring = async () => {
     if (monitorTimerRef.current) {
-      clearInterval(monitorTimerRef.current);
+      clearTimeout(monitorTimerRef.current);
       monitorTimerRef.current = null;
     }
 
@@ -538,7 +544,7 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      if (monitorTimerRef.current) clearInterval(monitorTimerRef.current);
+      if (monitorTimerRef.current) clearTimeout(monitorTimerRef.current);
       if (useNativeMeterRef.current && AudioMeter) {
         AudioMeter.stopRecording().catch(() => {});
       }
@@ -855,7 +861,7 @@ export default function App() {
             <Text style={styles.adjustButtonText}>+</Text>
           </TouchableOpacity>
         </View>
-        <Button title="恢复默认 (-45dB)" onPress={() => { setThresholdDb(DEFAULT_THRESHOLD_DB); saveSettings(DEFAULT_THRESHOLD_DB); }} />
+        <Button title="恢复默认 (-60dB)" onPress={() => { setThresholdDb(DEFAULT_THRESHOLD_DB); saveSettings(DEFAULT_THRESHOLD_DB); }} />
       </View>
     </ScrollView>
   );
