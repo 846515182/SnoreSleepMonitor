@@ -1,0 +1,84 @@
+name: Emulator Test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prebuild Android
+        run: npx expo prebuild --platform android --clean
+
+      - name: Build x86_64 debug APK
+        run: cd android && ./gradlew :app:assembleDebug -PreactNativeArchitectures=x86_64 --no-daemon
+
+      - name: Upload x86_64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-x86_64-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+
+  emulator-test:
+    runs-on: ubuntu-latest
+    needs: build-x86_64
+    steps:
+      - name: Download x86_64 APK
+        uses: actions/download-artifact@v4
+        with:
+          name: app-x86_64-debug
+          path: apk
+
+      - name: Run emulator smoke test
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          script: |
+            adb wait-for-device
+            adb install -t apk/app-debug.apk
+            adb shell pm grant com.snoresleep.monitor android.permission.RECORD_AUDIO
+            adb shell am start -n com.snoresleep.monitor/.MainActivity
+            sleep 15
+            PID=$(adb shell pidof com.snoresleep.monitor || true)
+            if [ -z "$PID" ]; then
+              echo "ERROR: com.snoresleep.monitor is not running"
+              exit 1
+            fi
+            echo "App is running, PID=$PID"
+            adb logcat -d -s AudioMeter:D > logcat.txt || true
+            adb shell screencap -p /sdcard/screen.png
+            adb pull /sdcard/screen.png screen.png
+
+      - name: Upload logs and screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-test-logs
+          path: |
+            logcat.txt
+            screen.png

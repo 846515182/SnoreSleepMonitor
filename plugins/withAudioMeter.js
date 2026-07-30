@@ -209,6 +209,7 @@ const AUDIO_METER_MODULE_KT = [
   `            latestIsSnoring = isSnoring`,
   `            latestAmplitudeDb = amplitudeDb`,
   `        }`,
+  `        Log.d(TAG, "Inference snore=%.3f noise=%.3f isSnoring=%s amp=%.1fdB".format(snoreConfidence, noiseConfidence, isSnoring, amplitudeDb))`,
   `    }`,
   ``,
   `    private fun computeSpectrogramFeatures(audioWindow: DoubleArray): DoubleArray {`,
