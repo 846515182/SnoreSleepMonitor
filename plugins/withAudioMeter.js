@@ -114,12 +114,36 @@ function withAudioMeter(config) {
   config = withMainApplication(config, (config) => {
     const contents = config.modResults.contents;
 
-    // 在 getPackages() 中添加 AudioMeterPackage（同 package 无需 import）
-    if (!contents.includes('packages.add(AudioMeterPackage())')) {
+    // 已存在则跳过（同 package 无需 import）
+    if (contents.includes('AudioMeterPackage')) {
+      return config;
+    }
+
+    // 格式 A: PackageList(this).packages.apply { ... }
+    if (/PackageList\(this\)\.packages\.apply\s*\{/.test(contents)) {
+      config.modResults.contents = contents.replace(
+        /PackageList\(this\)\.packages\.apply\s*\{/,
+        'PackageList(this).packages.apply {\n              add(AudioMeterPackage())'
+      );
+      return config;
+    }
+
+    // 格式 B: val packages = PackageList(this).packages.toMutableList()
+    if (/val packages = PackageList\(this\)\.packages\.toMutableList\(\)/.test(contents)) {
       config.modResults.contents = contents.replace(
         /val packages = PackageList\(this\)\.packages\.toMutableList\(\)/,
         'val packages = PackageList(this).packages.toMutableList()\n            packages.add(AudioMeterPackage())'
       );
+      return config;
+    }
+
+    // 格式 C: return PackageList(this).packages
+    if (/return PackageList\(this\)\.packages/.test(contents)) {
+      config.modResults.contents = contents.replace(
+        /return PackageList\(this\)\.packages/,
+        'val packages = PackageList(this).packages.toMutableList()\n            packages.add(AudioMeterPackage())\n            return packages'
+      );
+      return config;
     }
 
     return config;
