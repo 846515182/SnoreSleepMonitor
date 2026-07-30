@@ -69,6 +69,11 @@ function formatTime(ts: number): string {
   return `${d.getMonth() + 1}月${d.getDate()}日 ${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
+function formatClock(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+}
+
 function calculateQualityScore(sleepSeconds: number, noiseSeconds: number): number {
   if (sleepSeconds <= 0) return 100;
   const ratio = noiseSeconds / sleepSeconds;
@@ -96,6 +101,8 @@ export default function App() {
   const [grindCount, setGrindCount] = useState(0);
   const [totalNoiseSeconds, setTotalNoiseSeconds] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
+  const [playbackDurMs, setPlaybackDurMs] = useState(0); // 录音总时长（毫秒）
   const [isReady, setIsReady] = useState(false);
 
   const recordingRef = useRef<Audio.Recording | null>(null);
@@ -475,7 +482,7 @@ export default function App() {
     setSessions(updated);
   };
 
-  const playRecording = async (uri: string) => {
+  const playRecording = async (uri: string, startMs?: number) => {
     try {
       if (soundRef.current) {
         await soundRef.current.unloadAsync();
@@ -484,22 +491,48 @@ export default function App() {
       const { sound } = await Audio.Sound.createAsync({ uri });
       soundRef.current = sound;
       setIsPlaying(true);
-      await sound.playAsync();
       sound.setOnPlaybackStatusUpdate((status) => {
-        if (status.isLoaded && status.didJustFinish) {
+        if (!status.isLoaded) return;
+        setPlaybackPosMs(status.positionMillis || 0);
+        setPlaybackDurMs(status.durationMillis || 0);
+        if (status.didJustFinish) {
           setIsPlaying(false);
+          setPlaybackPosMs(0);
         }
       });
+      // 跳转到指定起始位置后播放
+      if (startMs && startMs > 0) {
+        await sound.setStatusAsync({ positionMillis: startMs, shouldPlay: true });
+      } else {
+        await sound.playAsync();
+      }
     } catch (e) {
       console.error('播放失败', e);
       Alert.alert('播放失败', String(e));
     }
   };
 
+  // 跳转到事件时间点播放
+  const seekToEvent = async (evt: SoundEvent) => {
+    if (!selectedSession?.recordingUri) return;
+    // 若已加载同一录音，直接 seek；否则重新加载
+    if (soundRef.current) {
+      try {
+        await soundRef.current.setStatusAsync({ positionMillis: evt.start, shouldPlay: true });
+        setIsPlaying(true);
+        return;
+      } catch (e) {
+        console.warn('跳转失败，重新加载', e);
+      }
+    }
+    await playRecording(selectedSession.recordingUri, evt.start);
+  };
+
   const stopPlayback = async () => {
     if (soundRef.current) {
       await soundRef.current.stopAsync();
       setIsPlaying(false);
+      setPlaybackPosMs(0);
     }
   };
 
@@ -639,6 +672,8 @@ export default function App() {
             style={styles.historyItem}
             onPress={() => {
               setSelectedSession(item);
+              setPlaybackPosMs(0);
+              setPlaybackDurMs(0);
               setScreen('detail');
             }}
           >
@@ -703,26 +738,59 @@ export default function App() {
               >
                 <Text style={styles.mainButtonText}>{isPlaying ? '停止播放' : '播放录音'}</Text>
               </TouchableOpacity>
+              {/* 播放进度条 */}
+              {playbackDurMs > 0 && (
+                <View style={{ marginTop: 12 }}>
+                  <View style={styles.volumeBarBg}>
+                    <View
+                      style={[
+                        styles.volumeBarFill,
+                        {
+                          width: `${Math.min(100, (playbackPosMs / playbackDurMs) * 100)}%`,
+                          backgroundColor: '#4ECDC4',
+                        },
+                      ]}
+                    />
+                  </View>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                    <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackPosMs / 1000))}</Text>
+                    <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackDurMs / 1000))}</Text>
+                  </View>
+                </View>
+              )}
             </View>
           ) : (
             <Text style={styles.noRecordingText}>未保存录音</Text>
           )}
 
-          <Text style={styles.sectionTitle}>异常声音事件</Text>
+          <Text style={styles.sectionTitle}>异常声音事件（点击跳转播放）</Text>
           {selectedSession.events.length === 0 ? (
             <Text style={styles.noRecordingText}>未检测到打鼾或磨牙事件</Text>
           ) : (
-            selectedSession.events.map((evt, idx) => (
-              <View key={idx} style={styles.eventRow}>
-                <Text style={[styles.eventIndex, evt.type === 'grind' ? { color: '#F1C40F' } : {}]}>
-                  #{idx + 1} {evt.type === 'snore' ? '鼾' : '磨牙'}
-                </Text>
-                <Text style={styles.eventTime}>
-                  {formatDuration(Math.floor(evt.start / 1000))} - {formatDuration(Math.floor(evt.end / 1000))}
-                </Text>
-                <Text style={styles.eventDuration}>{(evt.duration / 1000).toFixed(1)}s</Text>
-              </View>
-            ))
+            selectedSession.events.map((evt, idx) => {
+              const absStart = selectedSession.startTime + evt.start;
+              const isCurrent =
+                isPlaying && playbackPosMs >= evt.start - 500 && playbackPosMs <= evt.end + 500;
+              return (
+                <TouchableOpacity
+                  key={idx}
+                  style={[styles.eventRow, isCurrent ? { backgroundColor: 'rgba(78,205,196,0.15)' } : {}]}
+                  onPress={() => selectedSession.recordingUri && seekToEvent(evt)}
+                  disabled={!selectedSession.recordingUri}
+                >
+                  <Text style={[styles.eventIndex, evt.type === 'grind' ? { color: '#F1C40F' } : {}]}>
+                    #{idx + 1} {evt.type === 'snore' ? '打鼾' : '磨牙'}
+                  </Text>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.eventClock}>{formatClock(absStart)}</Text>
+                    <Text style={styles.eventDuration}>{(evt.duration / 1000).toFixed(1)}秒</Text>
+                  </View>
+                  {selectedSession.recordingUri && (
+                    <Text style={[styles.eventIndex, { color: '#4ECDC4', fontSize: 12 }]}>▶ 跳转</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })
           )}
 
           <View style={{ height: 16 }} />
@@ -1086,12 +1154,14 @@ const styles = StyleSheet.create({
   eventRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    paddingVertical: 10,
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
     borderBottomWidth: 1,
     borderBottomColor: '#E8EDF2',
   },
   eventIndex: {
-    width: 80,
+    width: 70,
     color: '#4ECDC4',
     fontWeight: '700',
   },
@@ -1100,8 +1170,15 @@ const styles = StyleSheet.create({
     color: '#1A2B3C',
     fontVariant: ['tabular-nums'],
   },
+  eventClock: {
+    color: '#1A2B3C',
+    fontSize: 15,
+    fontWeight: '600',
+    fontVariant: ['tabular-nums'],
+  },
   eventDuration: {
     color: '#7A8B9C',
+    fontSize: 12,
     fontVariant: ['tabular-nums'],
   },
   settingsDesc: {
