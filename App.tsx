@@ -45,12 +45,12 @@ type Screen = 'home' | 'history' | 'detail' | 'settings';
 // 常量
 const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
-const CHUNK_MS = 500; // 监测循环周期
-const DEFAULT_THRESHOLD_DB = -30; // 默认音量阈值 (dBFS)
-const MIN_SNORE_MS = 1500; // 最小打鼾持续时间
+const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
+const DEFAULT_THRESHOLD_DB = -45; // 默认音量阈值降低，更灵敏
+const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒即可
 const MAX_GRIND_MS = 1200; // 最大磨牙持续时间
-const MIN_GRIND_MS = 120; // 最小磨牙持续时间
-const COOLDOWN_MS = 800; // 事件冷却间隔
+const MIN_GRIND_MS = 80; // 最小磨牙持续时间
+const COOLDOWN_MS = 500; // 事件冷却间隔缩短
 
 // 辅助函数
 function formatDuration(totalSeconds: number): string {
@@ -215,6 +215,7 @@ export default function App() {
       eventsRef.current = [];
       currentEventRef.current = null;
       lastEventEndRef.current = 0;
+      lastLoudTimeRef.current = 0;
 
       monitorTimerRef.current = setInterval(monitorLoop, CHUNK_MS);
     } catch (e) {
@@ -223,6 +224,9 @@ export default function App() {
       setIsMonitoring(false);
     }
   };
+
+  const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
+  const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
 
   const monitorLoop = async () => {
     const recording = recordingRef.current;
@@ -240,6 +244,7 @@ export default function App() {
       const isLoud = metering >= thresholdDb;
 
       if (isLoud) {
+        lastLoudTimeRef.current = sessionElapsed;
         if (!currentEventRef.current) {
           currentEventRef.current = {
             start: sessionElapsed,
@@ -252,20 +257,36 @@ export default function App() {
           currentEventRef.current.duration = sessionElapsed - currentEventRef.current.start;
         }
       } else {
-        const evt = currentEventRef.current;
-        if (evt && sessionElapsed - lastEventEndRef.current >= COOLDOWN_MS) {
-          if (evt.duration >= MIN_SNORE_MS) {
-            evt.type = 'snore';
-            eventsRef.current.push({ ...evt });
-            setSnoreCount((c) => c + 1);
-          } else if (evt.duration >= MIN_GRIND_MS && evt.duration <= MAX_GRIND_MS) {
+        // 静音时，只有超过宽限期才结束当前事件
+        const silenceDuration = sessionElapsed - lastLoudTimeRef.current;
+        if (silenceDuration >= GRACE_MS) {
+          const evt = currentEventRef.current;
+          if (evt && (evt.end - evt.start) >= MIN_SNORE_MS) {
+            // 根据持续时间区分打鼾和磨牙
+            const duration = evt.end - evt.start;
+            if (duration >= MIN_SNORE_MS && duration <= MAX_GRIND_MS) {
+              // 中等时长：根据声音模式判断（这里简化为打鼾）
+              evt.type = 'snore';
+              eventsRef.current.push({ ...evt });
+              setSnoreCount((c) => c + 1);
+            } else if (duration > MAX_GRIND_MS) {
+              evt.type = 'snore';
+              eventsRef.current.push({ ...evt });
+              setSnoreCount((c) => c + 1);
+            } else if (duration >= MIN_GRIND_MS) {
+              evt.type = 'grind';
+              eventsRef.current.push({ ...evt });
+              setGrindCount((c) => c + 1);
+            }
+            lastEventEndRef.current = evt.end;
+          } else if (evt && (evt.end - evt.start) >= MIN_GRIND_MS && (evt.end - evt.start) < MIN_SNORE_MS) {
             evt.type = 'grind';
             eventsRef.current.push({ ...evt });
             setGrindCount((c) => c + 1);
+            lastEventEndRef.current = evt.end;
           }
-          lastEventEndRef.current = evt.end;
+          currentEventRef.current = null;
         }
-        currentEventRef.current = null;
       }
 
       const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
@@ -293,11 +314,12 @@ export default function App() {
 
         // 收尾当前事件
         const evt = currentEventRef.current;
-        if (evt && (endTime - startTimeRef.current) - lastEventEndRef.current >= COOLDOWN_MS) {
-          if (evt.duration >= MIN_SNORE_MS) {
+        if (evt) {
+          const duration = evt.end - evt.start;
+          if (duration >= MIN_SNORE_MS) {
             evt.type = 'snore';
             eventsRef.current.push({ ...evt });
-          } else if (evt.duration >= MIN_GRIND_MS && evt.duration <= MAX_GRIND_MS) {
+          } else if (duration >= MIN_GRIND_MS) {
             evt.type = 'grind';
             eventsRef.current.push({ ...evt });
           }
@@ -436,19 +458,27 @@ export default function App() {
         </View>
 
         <View style={styles.volumeBox}>
-          <Text style={styles.volumeLabel}>实时音量</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text style={styles.volumeLabel}>实时音量</Text>
+            <Text style={styles.volumeThreshold}>阈值 {thresholdDb} dB</Text>
+          </View>
           <View style={styles.volumeBarBg}>
             <View
               style={[
                 styles.volumeBarFill,
                 {
-                  width: `${Math.min(100, Math.max(0, (volumeDb + 60) / 60 * 100))}%`,
+                  width: `${Math.min(100, Math.max(0, (volumeDb + 80) / 80 * 100))}%`,
                   backgroundColor: volumeDb >= thresholdDb ? '#FF6B6B' : '#4ECDC4',
                 },
               ]}
             />
           </View>
-          <Text style={styles.volumeDb}>{volumeDb.toFixed(1)} dB</Text>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+            <Text style={styles.volumeDb}>{volumeDb.toFixed(1)} dB</Text>
+            <Text style={[styles.volumeDb, { color: volumeDb >= thresholdDb ? '#FF6B6B' : '#7A8B9C', fontWeight: volumeDb >= thresholdDb ? '700' : '400' }]}>
+              {volumeDb >= thresholdDb ? '● 超过阈值' : '○ 安静'}
+            </Text>
+          </View>
         </View>
 
         <TouchableOpacity
@@ -624,14 +654,14 @@ export default function App() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>声音检测阈值</Text>
         <Text style={styles.settingsDesc}>
-          当环境音量超过该阈值并持续一段时间，会被记为打鼾或磨牙。阈值越低越灵敏。磨牙声通常短促，打鼾声通常较长。
+          当环境音量超过该阈值并持续一段时间，会被记为打鼾或磨牙。阈值越低越灵敏。磨牙声通常短促，打鼾声通常较长。建议先在安静环境中观察实时音量，再设置为比环境音高 5-10 dB。
         </Text>
         <Text style={styles.thresholdValue}>{thresholdDb} dB</Text>
         <View style={styles.sliderRow}>
           <TouchableOpacity
             style={styles.adjustButton}
             onPress={() => {
-              const val = Math.max(-50, thresholdDb - 1);
+              const val = Math.max(-70, thresholdDb - 1);
               setThresholdDb(val);
               saveSettings(val);
             }}
@@ -650,7 +680,7 @@ export default function App() {
             <Text style={styles.adjustButtonText}>+</Text>
           </TouchableOpacity>
         </View>
-        <Button title="恢复默认 (-30dB)" onPress={() => { setThresholdDb(DEFAULT_THRESHOLD_DB); saveSettings(DEFAULT_THRESHOLD_DB); }} />
+        <Button title="恢复默认 (-45dB)" onPress={() => { setThresholdDb(DEFAULT_THRESHOLD_DB); saveSettings(DEFAULT_THRESHOLD_DB); }} />
       </View>
     </ScrollView>
   );
@@ -781,6 +811,11 @@ const styles = StyleSheet.create({
     color: '#7A8B9C',
     marginTop: 6,
     textAlign: 'right',
+  },
+  volumeThreshold: {
+    fontSize: 12,
+    color: '#FF6B6B',
+    fontWeight: '600',
   },
   mainButton: {
     borderRadius: 16,
