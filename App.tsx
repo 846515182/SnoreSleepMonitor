@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   FlatList,
+  NativeModules,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -17,6 +18,9 @@ import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
+
+// 原生音频模块（Android 专用，用 MediaRecorder.getMaxAmplitude 获取实时音量）
+const AudioMeter = NativeModules.AudioMeter;
 
 // 类型定义
 interface SoundEvent {
@@ -95,6 +99,8 @@ export default function App() {
   const [isReady, setIsReady] = useState(false);
 
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingUriRef = useRef<string>('');
+  const useNativeMeterRef = useRef<boolean>(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   const monitorTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventsRef = useRef<SoundEvent[]>([]);
@@ -198,39 +204,49 @@ export default function App() {
 
     try {
       await setupAudioMode();
-      // 自定义录音选项：必须启用 isMeteringEnabled 才能获取实时音量
-      const recordingOptions: Audio.RecordingOptions = {
-        isMeteringEnabled: true,
-        android: {
-          extension: '.m4a',
-          outputFormat: Audio.AndroidOutputFormat.MPEG_4,
-          audioEncoder: Audio.AndroidAudioEncoder.AAC,
-          sampleRate: 44100,
-          numberOfChannels: 1,
-          bitRate: 64000,
-        },
-        ios: {
-          extension: '.m4a',
-          outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-          audioQuality: Audio.IOSAudioQuality.HIGH,
-          sampleRate: 44100,
-          numberOfChannels: 1,
-          bitRate: 64000,
-          linearPCMBitDepth: 16,
-          linearPCMIsBigEndian: false,
-          linearPCMIsFloat: false,
-        },
-        web: {
-          mimeType: 'audio/webm',
-          bitsPerSecond: 64000,
-        },
-      };
-      const { recording } = await Audio.Recording.createAsync(
-        recordingOptions,
-        undefined,
-        100 // 每 100ms 更新一次状态
-      );
-      recordingRef.current = recording;
+
+      // 优先使用原生 AudioMeter 模块（Android），回退到 expo-av
+      if (Platform.OS === 'android' && AudioMeter) {
+        // 原生模块：用 MediaRecorder 录音 + getMaxAmplitude 获取音量
+        const recordingUri = await AudioMeter.startRecording();
+        recordingUriRef.current = recordingUri;
+        useNativeMeterRef.current = true;
+      } else {
+        useNativeMeterRef.current = false;
+        // expo-av 回退方案
+        const recordingOptions: Audio.RecordingOptions = {
+          isMeteringEnabled: true,
+          android: {
+            extension: '.m4a',
+            outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+            audioEncoder: Audio.AndroidAudioEncoder.AAC,
+            sampleRate: 44100,
+            numberOfChannels: 1,
+            bitRate: 64000,
+          },
+          ios: {
+            extension: '.m4a',
+            outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
+            audioQuality: Audio.IOSAudioQuality.HIGH,
+            sampleRate: 44100,
+            numberOfChannels: 1,
+            bitRate: 64000,
+            linearPCMBitDepth: 16,
+            linearPCMIsBigEndian: false,
+            linearPCMIsFloat: false,
+          },
+          web: {
+            mimeType: 'audio/webm',
+            bitsPerSecond: 64000,
+          },
+        };
+        const { recording } = await Audio.Recording.createAsync(
+          recordingOptions,
+          undefined,
+          100
+        );
+        recordingRef.current = recording;
+      }
 
       startTimeRef.current = Date.now();
       setSleepStartTime(startTimeRef.current);
@@ -260,6 +276,34 @@ export default function App() {
   const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
 
   const monitorLoop = async () => {
+    // 原生模块路径
+    if (useNativeMeterRef.current && AudioMeter) {
+      try {
+        const amplitude: number = await AudioMeter.getMaxAmplitude();
+        // 振幅 0-32767 转 dB（与 expo-av metering 对齐，-∞ 到 0）
+        let metering = -100;
+        if (amplitude > 0) {
+          metering = 20 * Math.log10(amplitude / 32767);
+        }
+        setVolumeDb(metering);
+        if (metering > maxVolumeDbRef.current) {
+          maxVolumeDbRef.current = metering;
+          setMaxVolumeDb(metering);
+        }
+
+        const now = Date.now();
+        const sessionElapsed = now - startTimeRef.current;
+        setElapsedSeconds(Math.floor(sessionElapsed / 1000));
+
+        const isLoud = metering >= thresholdDb;
+        detectEvent(isLoud, sessionElapsed);
+      } catch (e) {
+        console.warn('原生监测循环异常', e);
+      }
+      return;
+    }
+
+    // expo-av 回退路径
     const recording = recordingRef.current;
     if (!recording) return;
 
@@ -277,59 +321,63 @@ export default function App() {
       setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
       const isLoud = metering >= thresholdDb;
-
-      if (isLoud) {
-        lastLoudTimeRef.current = sessionElapsed;
-        if (!currentEventRef.current) {
-          currentEventRef.current = {
-            start: sessionElapsed,
-            end: sessionElapsed,
-            duration: 0,
-            type: 'snore',
-          };
-        } else {
-          currentEventRef.current.end = sessionElapsed;
-          currentEventRef.current.duration = sessionElapsed - currentEventRef.current.start;
-        }
-      } else {
-        // 静音时，只有超过宽限期才结束当前事件
-        const silenceDuration = sessionElapsed - lastLoudTimeRef.current;
-        if (silenceDuration >= GRACE_MS) {
-          const evt = currentEventRef.current;
-          if (evt && (evt.end - evt.start) >= MIN_SNORE_MS) {
-            // 根据持续时间区分打鼾和磨牙
-            const duration = evt.end - evt.start;
-            if (duration >= MIN_SNORE_MS && duration <= MAX_GRIND_MS) {
-              // 中等时长：根据声音模式判断（这里简化为打鼾）
-              evt.type = 'snore';
-              eventsRef.current.push({ ...evt });
-              setSnoreCount((c) => c + 1);
-            } else if (duration > MAX_GRIND_MS) {
-              evt.type = 'snore';
-              eventsRef.current.push({ ...evt });
-              setSnoreCount((c) => c + 1);
-            } else if (duration >= MIN_GRIND_MS) {
-              evt.type = 'grind';
-              eventsRef.current.push({ ...evt });
-              setGrindCount((c) => c + 1);
-            }
-            lastEventEndRef.current = evt.end;
-          } else if (evt && (evt.end - evt.start) >= MIN_GRIND_MS && (evt.end - evt.start) < MIN_SNORE_MS) {
-            evt.type = 'grind';
-            eventsRef.current.push({ ...evt });
-            setGrindCount((c) => c + 1);
-            lastEventEndRef.current = evt.end;
-          }
-          currentEventRef.current = null;
-        }
-      }
-
-      const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
-      const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
-      setTotalNoiseSeconds(Math.floor((finished + ongoing) / 1000));
+      detectEvent(isLoud, sessionElapsed);
     } catch (e) {
       console.warn('监测循环异常', e);
     }
+  };
+
+  // 事件检测公共逻辑（两种路径共用）
+  const detectEvent = (isLoud: boolean, sessionElapsed: number) => {
+    if (isLoud) {
+      lastLoudTimeRef.current = sessionElapsed;
+      if (!currentEventRef.current) {
+        currentEventRef.current = {
+          start: sessionElapsed,
+          end: sessionElapsed,
+          duration: 0,
+          type: 'snore',
+        };
+      } else {
+        currentEventRef.current.end = sessionElapsed;
+        currentEventRef.current.duration = sessionElapsed - currentEventRef.current.start;
+      }
+    } else {
+      // 静音时，只有超过宽限期才结束当前事件
+      const silenceDuration = sessionElapsed - lastLoudTimeRef.current;
+      if (silenceDuration >= GRACE_MS) {
+        const evt = currentEventRef.current;
+        if (evt && (evt.end - evt.start) >= MIN_SNORE_MS) {
+          // 根据持续时间区分打鼾和磨牙
+          const duration = evt.end - evt.start;
+          if (duration >= MIN_SNORE_MS && duration <= MAX_GRIND_MS) {
+            // 中等时长：根据声音模式判断（这里简化为打鼾）
+            evt.type = 'snore';
+            eventsRef.current.push({ ...evt });
+            setSnoreCount((c) => c + 1);
+          } else if (duration > MAX_GRIND_MS) {
+            evt.type = 'snore';
+            eventsRef.current.push({ ...evt });
+            setSnoreCount((c) => c + 1);
+          } else if (duration >= MIN_GRIND_MS) {
+            evt.type = 'grind';
+            eventsRef.current.push({ ...evt });
+            setGrindCount((c) => c + 1);
+          }
+          lastEventEndRef.current = evt.end;
+        } else if (evt && (evt.end - evt.start) >= MIN_GRIND_MS && (evt.end - evt.start) < MIN_SNORE_MS) {
+          evt.type = 'grind';
+          eventsRef.current.push({ ...evt });
+          setGrindCount((c) => c + 1);
+          lastEventEndRef.current = evt.end;
+        }
+        currentEventRef.current = null;
+      }
+    }
+
+    const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
+    const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
+    setTotalNoiseSeconds(Math.floor((finished + ongoing) / 1000));
   };
 
   const stopMonitoring = async () => {
@@ -338,59 +386,77 @@ export default function App() {
       monitorTimerRef.current = null;
     }
 
-    const recording = recordingRef.current;
-    if (recording) {
+    let uri: string | undefined;
+
+    // 原生模块停止
+    if (useNativeMeterRef.current && AudioMeter) {
       try {
-        await recording.stopAndUnloadAsync();
-        const uri = recording.getURI();
-
-        const endTime = Date.now();
-        const durationSeconds = Math.max(1, Math.floor((endTime - startTimeRef.current) / 1000));
-
-        // 收尾当前事件
-        const evt = currentEventRef.current;
-        if (evt) {
-          const duration = evt.end - evt.start;
-          if (duration >= MIN_SNORE_MS) {
-            evt.type = 'snore';
-            eventsRef.current.push({ ...evt });
-          } else if (duration >= MIN_GRIND_MS) {
-            evt.type = 'grind';
-            eventsRef.current.push({ ...evt });
-          }
-        }
-
-        const snoreEvents = eventsRef.current.filter((e) => e.type === 'snore');
-        const grindEvents = eventsRef.current.filter((e) => e.type === 'grind');
-        const totalSnoreMs = snoreEvents.reduce((sum, e) => sum + e.duration, 0);
-        const totalGrindMs = grindEvents.reduce((sum, e) => sum + e.duration, 0);
-        const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs) / 1000);
-
-        const session: SleepSession = {
-          id: `${startTimeRef.current}`,
-          startTime: startTimeRef.current,
-          endTime,
-          durationSeconds,
-          events: eventsRef.current,
-          snoreCount: snoreEvents.length,
-          grindCount: grindEvents.length,
-          totalSnoreSeconds: Math.floor(totalSnoreMs / 1000),
-          totalGrindSeconds: Math.floor(totalGrindMs / 1000),
-          recordingUri: uri ?? undefined,
-          qualityScore: calculateQualityScore(durationSeconds, totalNoiseSec),
-        };
-
-        const updated = [session, ...sessions];
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-        setSessions(updated);
+        uri = await AudioMeter.stopRecording();
       } catch (e) {
-        console.error('停止录音失败', e);
-        Alert.alert('保存失败', String(e));
-      } finally {
-        recordingRef.current = null;
+        console.error('原生停止录音失败', e);
+      }
+    } else {
+      // expo-av 停止
+      const recording = recordingRef.current;
+      if (recording) {
+        try {
+          await recording.stopAndUnloadAsync();
+          uri = recording.getURI() ?? undefined;
+        } catch (e) {
+          console.error('停止录音失败', e);
+        } finally {
+          recordingRef.current = null;
+        }
       }
     }
 
+    try {
+      const endTime = Date.now();
+      const durationSeconds = Math.max(1, Math.floor((endTime - startTimeRef.current) / 1000));
+
+      // 收尾当前事件
+      const evt = currentEventRef.current;
+      if (evt) {
+        const duration = evt.end - evt.start;
+        if (duration >= MIN_SNORE_MS) {
+          evt.type = 'snore';
+          eventsRef.current.push({ ...evt });
+        } else if (duration >= MIN_GRIND_MS) {
+          evt.type = 'grind';
+          eventsRef.current.push({ ...evt });
+        }
+      }
+
+      const snoreEvents = eventsRef.current.filter((e) => e.type === 'snore');
+      const grindEvents = eventsRef.current.filter((e) => e.type === 'grind');
+      const totalSnoreMs = snoreEvents.reduce((sum, e) => sum + e.duration, 0);
+      const totalGrindMs = grindEvents.reduce((sum, e) => sum + e.duration, 0);
+      const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs) / 1000);
+
+      const session: SleepSession = {
+        id: `${startTimeRef.current}`,
+        startTime: startTimeRef.current,
+        endTime,
+        durationSeconds,
+        events: eventsRef.current,
+        snoreCount: snoreEvents.length,
+        grindCount: grindEvents.length,
+        totalSnoreSeconds: Math.floor(totalSnoreMs / 1000),
+        totalGrindSeconds: Math.floor(totalGrindMs / 1000),
+        recordingUri: uri,
+        qualityScore: calculateQualityScore(durationSeconds, totalNoiseSec),
+      };
+
+      const updated = [session, ...sessions];
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
+      setSessions(updated);
+    } catch (e) {
+      console.error('保存会话失败', e);
+      Alert.alert('保存失败', String(e));
+    }
+
+    useNativeMeterRef.current = false;
+    recordingUriRef.current = '';
     setIsMonitoring(false);
     setVolumeDb(-100);
   };
@@ -440,6 +506,9 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (monitorTimerRef.current) clearInterval(monitorTimerRef.current);
+      if (useNativeMeterRef.current && AudioMeter) {
+        AudioMeter.stopRecording().catch(() => {});
+      }
       if (recordingRef.current) {
         recordingRef.current.stopAndUnloadAsync().catch(() => {});
       }

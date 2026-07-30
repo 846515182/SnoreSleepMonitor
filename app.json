@@ -40,7 +40,8 @@
         {
           "microphonePermission": "睡眠监测需要访问麦克风以录制鼾声和环境音。"
         }
-      ]
+      ],
+      "./plugins/withAudioMeter.js"
     ]
   }
 }
