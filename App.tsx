@@ -50,10 +50,9 @@ type Screen = 'home' | 'history' | 'detail' | 'settings';
 const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
-const DEFAULT_THRESHOLD_DB = -60; // 默认音量阈值，-60dB 更灵敏，环境安静时约 -70~-80，打鼾约 -30~-50
+const DEFAULT_SNORE_CONFIDENCE = 0.5; // 默认鼾声置信度阈值（50%）
+const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
 const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒即可
-const MAX_GRIND_MS = 1200; // 最大磨牙持续时间
-const MIN_GRIND_MS = 80; // 最小磨牙持续时间
 const COOLDOWN_MS = 500; // 事件冷却间隔缩短
 
 // 辅助函数
@@ -94,7 +93,9 @@ export default function App() {
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [volumeDb, setVolumeDb] = useState(-100);
   const [maxVolumeDb, setMaxVolumeDb] = useState(-100);
-  const [thresholdDb, setThresholdDb] = useState(DEFAULT_THRESHOLD_DB);
+  const [snoreThreshold, setSnoreThreshold] = useState(DEFAULT_SNORE_CONFIDENCE);
+  const [snoreConfidence, setSnoreConfidence] = useState(0);
+  const [isSnoringNow, setIsSnoringNow] = useState(false);
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [snoreCount, setSnoreCount] = useState(0);
@@ -124,8 +125,8 @@ export default function App() {
         const settingsRaw = await AsyncStorage.getItem(SETTINGS_KEY);
         if (settingsRaw) {
           const settings = JSON.parse(settingsRaw);
-          if (typeof settings.thresholdDb === 'number' && mounted) {
-            setThresholdDb(settings.thresholdDb);
+          if (typeof settings.snoreThreshold === 'number' && mounted) {
+            setSnoreThreshold(Math.max(0.1, Math.min(0.9, settings.snoreThreshold)));
           }
         }
       } catch (e) {
@@ -156,7 +157,7 @@ export default function App() {
 
   const saveSettings = async (newThreshold: number) => {
     try {
-      await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ thresholdDb: newThreshold }));
+      await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ snoreThreshold: newThreshold }));
     } catch (e) {
       console.warn('保存设置失败', e);
     }
@@ -297,16 +298,14 @@ export default function App() {
   const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
 
   const monitorLoop = async () => {
-    // 原生模块路径
+    // 原生模块路径：使用 TFLite 鼾声检测模型
     if (useNativeMeterRef.current && AudioMeter) {
       try {
-        const amplitude: number = await AudioMeter.getMaxAmplitude();
-        // 振幅 0-32767 转 dB（与 expo-av metering 对齐，-∞ 到 0）
-        let metering = -100;
-        if (amplitude > 0) {
-          metering = 20 * Math.log10(amplitude / 32767);
-        }
+        const result = await AudioMeter.getLatestResult();
+        const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
+        const confidence = typeof result.snoreConfidence === 'number' ? result.snoreConfidence : 0;
         setVolumeDb(metering);
+        setSnoreConfidence(confidence);
         if (metering > maxVolumeDbRef.current) {
           maxVolumeDbRef.current = metering;
           setMaxVolumeDb(metering);
@@ -316,7 +315,8 @@ export default function App() {
         const sessionElapsed = now - startTimeRef.current;
         setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-        const isLoud = metering >= thresholdDb;
+        const isLoud = !!result.isSnoring && confidence >= snoreThreshold;
+        setIsSnoringNow(isLoud);
         detectEvent(isLoud, sessionElapsed);
       } catch (e) {
         console.warn('原生监测循环异常', e);
@@ -327,6 +327,8 @@ export default function App() {
     // expo-av 回退路径：从 onRecordingStatusUpdate 回调读取最新 metering
     const metering = lastMeteringRef.current;
     setVolumeDb(metering);
+    setSnoreConfidence(0);
+    setIsSnoringNow(false);
     if (metering > maxVolumeDbRef.current) {
       maxVolumeDbRef.current = metering;
       setMaxVolumeDb(metering);
@@ -336,11 +338,11 @@ export default function App() {
     const sessionElapsed = now - startTimeRef.current;
     setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-    const isLoud = metering >= thresholdDb;
+    const isLoud = metering >= FALLBACK_THRESHOLD_DB;
     detectEvent(isLoud, sessionElapsed);
   };
 
-  // 事件检测公共逻辑（两种路径共用）
+  // 事件检测公共逻辑：模型判断为打鼾且持续足够时间才记录
   const detectEvent = (isLoud: boolean, sessionElapsed: number) => {
     if (isLoud) {
       lastLoudTimeRef.current = sessionElapsed;
@@ -361,27 +363,8 @@ export default function App() {
       if (silenceDuration >= GRACE_MS) {
         const evt = currentEventRef.current;
         if (evt && (evt.end - evt.start) >= MIN_SNORE_MS) {
-          // 根据持续时间区分打鼾和磨牙
-          const duration = evt.end - evt.start;
-          if (duration >= MIN_SNORE_MS && duration <= MAX_GRIND_MS) {
-            // 中等时长：根据声音模式判断（这里简化为打鼾）
-            evt.type = 'snore';
-            eventsRef.current.push({ ...evt });
-            setSnoreCount((c) => c + 1);
-          } else if (duration > MAX_GRIND_MS) {
-            evt.type = 'snore';
-            eventsRef.current.push({ ...evt });
-            setSnoreCount((c) => c + 1);
-          } else if (duration >= MIN_GRIND_MS) {
-            evt.type = 'grind';
-            eventsRef.current.push({ ...evt });
-            setGrindCount((c) => c + 1);
-          }
-          lastEventEndRef.current = evt.end;
-        } else if (evt && (evt.end - evt.start) >= MIN_GRIND_MS && (evt.end - evt.start) < MIN_SNORE_MS) {
-          evt.type = 'grind';
           eventsRef.current.push({ ...evt });
-          setGrindCount((c) => c + 1);
+          setSnoreCount((c) => c + 1);
           lastEventEndRef.current = evt.end;
         }
         currentEventRef.current = null;
@@ -434,9 +417,6 @@ export default function App() {
         if (duration >= MIN_SNORE_MS) {
           evt.type = 'snore';
           eventsRef.current.push({ ...evt });
-        } else if (duration >= MIN_GRIND_MS) {
-          evt.type = 'grind';
-          eventsRef.current.push({ ...evt });
         }
       }
 
@@ -472,6 +452,8 @@ export default function App() {
     recordingUriRef.current = '';
     setIsMonitoring(false);
     setVolumeDb(-100);
+    setSnoreConfidence(0);
+    setIsSnoringNow(false);
   };
 
   const deleteSession = async (id: string) => {
@@ -603,7 +585,7 @@ export default function App() {
         <View style={styles.volumeBox}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
             <Text style={styles.volumeLabel}>实时音量</Text>
-            <Text style={styles.volumeThreshold}>阈值 {thresholdDb} dB</Text>
+            <Text style={styles.volumeThreshold}>置信度阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
           </View>
           <View style={styles.volumeBarBg}>
             <View
@@ -611,19 +593,22 @@ export default function App() {
                 styles.volumeBarFill,
                 {
                   width: `${Math.min(100, Math.max(0, (volumeDb + 80) / 80 * 100))}%`,
-                  backgroundColor: volumeDb >= thresholdDb ? '#FF6B6B' : '#4ECDC4',
+                  backgroundColor: isSnoringNow ? '#FF6B6B' : '#4ECDC4',
                 },
               ]}
             />
           </View>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
             <Text style={styles.volumeDb}>{volumeDb.toFixed(1)} dB</Text>
-            <Text style={[styles.volumeDb, { color: volumeDb >= thresholdDb ? '#FF6B6B' : '#7A8B9C', fontWeight: volumeDb >= thresholdDb ? '700' : '400' }]}>
-              {volumeDb >= thresholdDb ? '● 超过阈值' : '○ 安静'}
+            <Text style={[styles.volumeDb, { color: isSnoringNow ? '#FF6B6B' : '#7A8B9C', fontWeight: isSnoringNow ? '700' : '400' }]}>
+              {isSnoringNow ? '● 检测到打鼾' : '○ 安静'}
             </Text>
           </View>
           <Text style={[styles.volumeDb, { color: '#FFD93D', marginTop: 4 }]}>
             本次最大音量: {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
+          </Text>
+          <Text style={[styles.volumeDb, { color: '#4ECDC4', marginTop: 4 }]}>
+            鼾声置信度: {(snoreConfidence * 100).toFixed(1)}%
           </Text>
         </View>
 
@@ -835,15 +820,15 @@ export default function App() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>声音检测阈值</Text>
         <Text style={styles.settingsDesc}>
-          当环境音量超过该阈值并持续一段时间，会被记为打鼾或磨牙。阈值越低越灵敏。磨牙声通常短促，打鼾声通常较长。建议先在安静环境中观察实时音量，再设置为比环境音高 5-10 dB。
+          当模型判断为“打鼾”且置信度超过该阈值并持续一段时间，才会被记为一次打鼾事件。阈值越低越灵敏，误报可能增加；阈值越高越保守，漏报可能增加。
         </Text>
-        <Text style={styles.thresholdValue}>{thresholdDb} dB</Text>
+        <Text style={styles.thresholdValue}>{(snoreThreshold * 100).toFixed(0)}%</Text>
         <View style={styles.sliderRow}>
           <TouchableOpacity
             style={styles.adjustButton}
             onPress={() => {
-              const val = Math.max(-70, thresholdDb - 1);
-              setThresholdDb(val);
+              const val = Math.max(0.1, parseFloat((snoreThreshold - 0.05).toFixed(2)));
+              setSnoreThreshold(val);
               saveSettings(val);
             }}
           >
@@ -853,15 +838,15 @@ export default function App() {
           <TouchableOpacity
             style={styles.adjustButton}
             onPress={() => {
-              const val = Math.min(-10, thresholdDb + 1);
-              setThresholdDb(val);
+              const val = Math.min(0.9, parseFloat((snoreThreshold + 0.05).toFixed(2)));
+              setSnoreThreshold(val);
               saveSettings(val);
             }}
           >
             <Text style={styles.adjustButtonText}>+</Text>
           </TouchableOpacity>
         </View>
-        <Button title="恢复默认 (-60dB)" onPress={() => { setThresholdDb(DEFAULT_THRESHOLD_DB); saveSettings(DEFAULT_THRESHOLD_DB); }} />
+        <Button title="恢复默认 (50%)" onPress={() => { setSnoreThreshold(DEFAULT_SNORE_CONFIDENCE); saveSettings(DEFAULT_SNORE_CONFIDENCE); }} />
       </View>
     </ScrollView>
   );
