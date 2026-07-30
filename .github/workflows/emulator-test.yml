@@ -43,7 +43,7 @@ jobs:
           path: android/app/build/outputs/apk/debug/*.apk
 
   emulator-test:
-    runs-on: macos-latest
+    runs-on: macos-13
     needs: build-x86_64
     steps:
       - name: Download x86_64 APK
