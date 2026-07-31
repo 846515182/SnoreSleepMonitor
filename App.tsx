@@ -14,6 +14,7 @@ import {
   PermissionsAndroid,
   ActivityIndicator,
   Linking,
+  StatusBar as RNStatusBar,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
@@ -48,7 +49,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.0.2';
+const CURRENT_VERSION = '1.0.3';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -1275,7 +1276,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: 16,
+    paddingTop: (RNStatusBar.currentHeight || 0) + 16,
     paddingBottom: 14,
     backgroundColor: '#fff',
   },
