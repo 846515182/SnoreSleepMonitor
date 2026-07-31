@@ -58,7 +58,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.0';
+const CURRENT_VERSION = '1.1.1';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -66,7 +66,7 @@ const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
 const DEFAULT_SNORE_CONFIDENCE = 0.45; // 默认鼾声置信度阈值（YAMNet 更准，可适当放宽）
-const DEFAULT_GRIND_CONFIDENCE = 0.35; // 默认磨牙置信度阈值
+const DEFAULT_GRIND_CONFIDENCE = 0.25; // 默认磨牙置信度阈值（YAMNet 聚合分数）
 const DEFAULT_TALK_CONFIDENCE = 0.5; // 默认梦话置信度阈值
 const DEFAULT_APNEA_CONFIDENCE = 0.45; // 默认呼吸暂停（Gasp 等）置信度阈值
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
@@ -203,6 +203,8 @@ export default function App() {
   const currentMaxSnoreConfRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
+  const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
+  const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
   const downloadResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
 
   // 加载设置与历史
@@ -444,7 +446,8 @@ export default function App() {
   };
 
   const startMonitoring = async () => {
-    if (isBusy || isMonitoring) return;
+    // 防止重复启动：UI 状态或原生引用任一处于活跃状态都直接返回
+    if (isBusy || isMonitoring || useNativeMeterRef.current || recordingRef.current) return;
     setIsBusy(true);
     const permitted = await checkPermission();
     setHasPermission(permitted);
@@ -457,13 +460,21 @@ export default function App() {
     try {
       await setupAudioMode();
 
-      // 优先使用原生 AudioMeter 模块（Android），回退到 expo-av
+      // 优先使用原生 AudioMeter 模块（Android），失败时自动降级到 expo-av
+      let nativeStarted = false;
       if (Platform.OS === 'android' && AudioMeter) {
-        // 原生模块：用 MediaRecorder 录音 + getMaxAmplitude 获取音量
-        const recordingUri = await AudioMeter.startRecording();
-        recordingUriRef.current = recordingUri;
-        useNativeMeterRef.current = true;
-      } else {
+        try {
+          // 原生模块：用 AudioRecord 录音 + YAMNet 模型实时推理
+          const recordingUri = await AudioMeter.startRecording();
+          recordingUriRef.current = recordingUri;
+          useNativeMeterRef.current = true;
+          nativeStarted = true;
+        } catch (nativeErr) {
+          console.warn('原生 AudioMeter 启动失败，降级到 expo-av', nativeErr);
+          useNativeMeterRef.current = false;
+        }
+      }
+      if (!nativeStarted) {
         useNativeMeterRef.current = false;
         lastMeteringRef.current = -100;
         // expo-av 回退方案：用 onRecordingStatusUpdate 回调获取 metering（比 getStatusAsync 更可靠）
@@ -543,6 +554,7 @@ export default function App() {
         }
       };
       monitorTimerRef.current = setTimeout(runLoop, CHUNK_MS);
+      setIsMonitoring(true);
     } catch (e) {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
@@ -551,9 +563,6 @@ export default function App() {
       setIsBusy(false);
     }
   };
-
-  const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
-  const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
 
   const classifyIntensity = (conf: number): 'mild' | 'moderate' | 'severe' => {
     if (conf >= 0.75) return 'severe';
@@ -591,9 +600,11 @@ export default function App() {
         const sessionElapsed = now - startTimeRef.current;
         setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-        // 按当前 top 类别做阈值判断，避免同一帧被重复归类
+        // 帧级分类：打鼾/梦话/呼吸暂停仍要求是该帧 top 类别；
+        // 磨牙放宽为只要置信度超过阈值且高于其它三种事件即可（不必胜过噪音），
+        // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
         const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
-        const isGrindFrame = tClass === 'grinding' && gConf >= grindThreshold;
+        const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf && gConf >= aConf;
         const isTalkFrame = tClass === 'talking' && tConf >= DEFAULT_TALK_CONFIDENCE;
         const isApneaFrame = tClass === 'apnea' && aConf >= DEFAULT_APNEA_CONFIDENCE;
         const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
@@ -714,7 +725,7 @@ export default function App() {
     } else if (talkRatio >= 0.5 && duration >= MIN_TALK_MS) {
       type = 'talk';
       valid = true;
-    } else if (grindRatio >= 0.5 && duration >= MIN_GRIND_MS && duration <= MAX_GRIND_MS) {
+    } else if (grindRatio >= 0.3 && duration >= MIN_GRIND_MS && duration <= MAX_GRIND_MS) {
       type = 'grind';
       valid = true;
     }
