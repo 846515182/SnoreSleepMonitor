@@ -61,7 +61,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.3';
+const CURRENT_VERSION = '1.1.4';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -1189,11 +1189,13 @@ export default function App() {
 
   // UI 渲染
   const renderHome = () => (
-    <ScrollView contentContainerStyle={styles.homeContent}>
+    <ScrollView contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
+      {/* 顶部标题区 */}
       <View style={styles.heroCard}>
+        <View style={styles.heroAccentBar} />
         <View style={styles.heroHeader}>
           <View style={styles.appIconCircle}>
-            <Ionicons name="moon-outline" size={28} color="#fff" />
+            <Ionicons name="moon" size={26} color="#fff" />
           </View>
           <View style={styles.heroTitleBlock}>
             <Text style={styles.title}>睡眠监测</Text>
@@ -1213,8 +1215,8 @@ export default function App() {
 
         {hasPermission === false && (
           <View style={styles.warningBox}>
-            <Ionicons name="warning-outline" size={22} color="#E65100" />
-            <View style={{ flex: 1, marginLeft: 12 }}>
+            <Ionicons name="warning-outline" size={20} color="#E65100" />
+            <View style={{ flex: 1, marginLeft: 10 }}>
               <Text style={styles.warningText}>未获得麦克风权限，无法录音。</Text>
             </View>
             <TouchableOpacity
@@ -1228,46 +1230,60 @@ export default function App() {
 
         {isFallbackMode && (
           <View style={styles.infoBox}>
-            <Ionicons name="information-circle-outline" size={22} color="#0066CC" />
+            <Ionicons name="information-circle-outline" size={20} color="#0066CC" />
             <Text style={styles.infoText}>
-              当前运行在兼容模式，仅检测音量，不区分鼾声/磨牙等事件。
+              兼容模式：仅检测音量，不区分鼾声/磨牙等事件。
             </Text>
           </View>
         )}
 
+        {/* 计时器 */}
         <View style={styles.timerBox}>
-          <Text style={styles.timerLabel}>{isMonitoring ? '监测中' : '本次睡眠'}</Text>
+          <View style={styles.timerPill}>
+            <View style={[styles.timerDot, { backgroundColor: isMonitoring ? THEME.danger : THEME.textTertiary }]} />
+            <Text style={styles.timerLabel}>{isMonitoring ? '监测中' : '待机'}</Text>
+          </View>
           <Text style={styles.timerValue}>{formatDuration(elapsedSeconds)}</Text>
         </View>
 
+        {/* 四类统计卡片 */}
         <View style={styles.statsGrid}>
-          <View style={[styles.statCard, { borderLeftColor: THEME.snore }]}>
-            <Ionicons name="volume-high-outline" size={22} color={THEME.snore} />
+          <View style={styles.statCard}>
+            <View style={[styles.statIconCircle, { backgroundColor: `${THEME.snore}18` }]}>
+              <Ionicons name="volume-high" size={20} color={THEME.snore} />
+            </View>
             <Text style={styles.statValue}>{snoreCount}</Text>
             <Text style={styles.statLabel}>打鼾</Text>
           </View>
-          <View style={[styles.statCard, { borderLeftColor: THEME.grind }]}>
-            <Ionicons name="git-branch-outline" size={22} color={THEME.grind} />
+          <View style={styles.statCard}>
+            <View style={[styles.statIconCircle, { backgroundColor: `${THEME.grind}18` }]}>
+              <Ionicons name="git-branch" size={20} color={THEME.grind} />
+            </View>
             <Text style={styles.statValue}>{grindCount}</Text>
             <Text style={styles.statLabel}>磨牙</Text>
           </View>
-          <View style={[styles.statCard, { borderLeftColor: THEME.talk }]}>
-            <Ionicons name="chatbubble-outline" size={22} color={THEME.talk} />
+          <View style={styles.statCard}>
+            <View style={[styles.statIconCircle, { backgroundColor: `${THEME.talk}18` }]}>
+              <Ionicons name="chatbubble" size={20} color={THEME.talk} />
+            </View>
             <Text style={styles.statValue}>{talkCount}</Text>
             <Text style={styles.statLabel}>梦话</Text>
           </View>
-          <View style={[styles.statCard, { borderLeftColor: THEME.apnea }]}>
-            <Ionicons name="pulse-outline" size={22} color={THEME.apnea} />
+          <View style={styles.statCard}>
+            <View style={[styles.statIconCircle, { backgroundColor: `${THEME.apnea}18` }]}>
+              <Ionicons name="pulse" size={20} color={THEME.apnea} />
+            </View>
             <Text style={styles.statValue}>{apneaCount}</Text>
             <Text style={styles.statLabel}>呼吸暂停</Text>
           </View>
         </View>
 
+        {/* 实时音量区域 */}
         <View style={styles.volumeBox}>
           <View style={styles.volumeHeader}>
             <Text style={styles.volumeLabel}>实时音量</Text>
-            <View style={styles.badge}>
-              <Text style={styles.badgeText}>鼾声阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
+            <View style={[styles.badge, { backgroundColor: `${THEME.snore}15` }]}>
+              <Text style={[styles.badgeText, { color: THEME.snore }]}>阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
             </View>
           </View>
           <View style={styles.volumeBarBg}>
@@ -1287,24 +1303,57 @@ export default function App() {
               {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
             </Text>
           </View>
-          <View style={styles.modelRow}>
-            <Ionicons name="analytics-outline" size={14} color={THEME.textTertiary} />
-            <Text style={[styles.volumeDb, styles.modelText]}>
-              {getClassLabel(topClass)} {(topConfidence * 100).toFixed(0)}% · 鼾{(snoreConfidence * 100).toFixed(0)}% 磨{(grindConfidence * 100).toFixed(0)}% 话{(talkConfidence * 100).toFixed(0)}% 停{(apneaConfidence * 100).toFixed(0)}%
-            </Text>
-          </View>
+
+          {/* AI 模型置信度 - 分卡片展示 */}
+          {!isFallbackMode && (
+            <View style={styles.confidenceGrid}>
+              <View style={[styles.confidenceChip, { backgroundColor: `${THEME.snore}12` }]}>
+                <Text style={[styles.confidenceLabel, { color: THEME.snore }]}>打鼾</Text>
+                <Text style={[styles.confidenceValue, { color: THEME.snore }]}>{(snoreConfidence * 100).toFixed(0)}%</Text>
+              </View>
+              <View style={[styles.confidenceChip, { backgroundColor: `${THEME.grind}12` }]}>
+                <Text style={[styles.confidenceLabel, { color: THEME.grind }]}>磨牙</Text>
+                <Text style={[styles.confidenceValue, { color: THEME.grind }]}>{(grindConfidence * 100).toFixed(0)}%</Text>
+              </View>
+              <View style={[styles.confidenceChip, { backgroundColor: `${THEME.talk}12` }]}>
+                <Text style={[styles.confidenceLabel, { color: THEME.talk }]}>梦话</Text>
+                <Text style={[styles.confidenceValue, { color: THEME.talk }]}>{(talkConfidence * 100).toFixed(0)}%</Text>
+              </View>
+              <View style={[styles.confidenceChip, { backgroundColor: `${THEME.apnea}12` }]}>
+                <Text style={[styles.confidenceLabel, { color: THEME.apnea }]}>暂停</Text>
+                <Text style={[styles.confidenceValue, { color: THEME.apnea }]}>{(apneaConfidence * 100).toFixed(0)}%</Text>
+              </View>
+            </View>
+          )}
+
+          {/* 当前识别类别 */}
+          {!isFallbackMode && (
+            <View style={styles.topClassRow}>
+              <Ionicons name="analytics" size={14} color={THEME.textTertiary} />
+              <Text style={styles.topClassText}>
+                当前识别：{getClassLabel(topClass)} {(topConfidence * 100).toFixed(0)}%
+              </Text>
+            </View>
+          )}
+
           {snoreIntensity && (
             <View style={[styles.intensityBadge, { backgroundColor: getIntensityColor(snoreIntensity) + '20' }]}>
-              <Text style={[styles.volumeDb, { color: getIntensityColor(snoreIntensity), fontWeight: '700' }]}>
+              <Ionicons name="alert-circle" size={14} color={getIntensityColor(snoreIntensity)} />
+              <Text style={[styles.intensityText, { color: getIntensityColor(snoreIntensity) }]}>
                 鼾声强度：{getIntensityLabel(snoreIntensity)}
               </Text>
             </View>
           )}
-          <Text style={[styles.volumeDb, { color: THEME.warning, marginTop: 8 }]}>
-            本次最大：{maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
-          </Text>
+
+          <View style={styles.maxVolumeRow}>
+            <Ionicons name="trophy-outline" size={13} color={THEME.warning} />
+            <Text style={[styles.volumeDb, { color: THEME.warning, marginLeft: 4 }]}>
+              本次最大：{maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
+            </Text>
+          </View>
         </View>
 
+        {/* 主按钮 */}
         <TouchableOpacity
           style={[
             styles.mainButton,
@@ -1320,8 +1369,8 @@ export default function App() {
           ) : (
             <>
               <Ionicons
-                name={isMonitoring ? 'square' : 'play'}
-                size={20}
+                name={isMonitoring ? 'stop-circle' : 'play-circle'}
+                size={22}
                 color="#fff"
                 style={{ marginRight: 8 }}
               />
@@ -1334,19 +1383,24 @@ export default function App() {
 
         {isMonitoring && (
           <View style={styles.tipRow}>
-            <Ionicons name="battery-charging-outline" size={14} color={THEME.textTertiary} />
-            <Text style={styles.tipText}>监测中…建议连接充电器，保持屏幕常亮</Text>
+            <Ionicons name="battery-charging" size={13} color={THEME.textTertiary} />
+            <Text style={styles.tipText}>监测中 · 建议连接充电器，保持屏幕常亮</Text>
           </View>
         )}
       </View>
 
+      {/* 底部导航 */}
       <View style={styles.navRow}>
-        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('history')}>
-          <Ionicons name="time-outline" size={22} color={THEME.primary} />
+        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('history')} activeOpacity={0.85}>
+          <View style={[styles.navIconCircle, { backgroundColor: `${THEME.primary}15` }]}>
+            <Ionicons name="time" size={22} color={THEME.primary} />
+          </View>
           <Text style={styles.navButtonText}>历史记录</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('settings')}>
-          <Ionicons name="options-outline" size={22} color={THEME.primary} />
+        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('settings')} activeOpacity={0.85}>
+          <View style={[styles.navIconCircle, { backgroundColor: `${THEME.primary}15` }]}>
+            <Ionicons name="settings" size={22} color={THEME.primary} />
+          </View>
           <Text style={styles.navButtonText}>灵敏度设置</Text>
         </TouchableOpacity>
       </View>
@@ -1951,11 +2005,20 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.card,
     borderRadius: 28,
     padding: 22,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.08,
-    shadowRadius: 24,
-    elevation: 6,
+    overflow: 'hidden',
+    shadowColor: '#1A2B3C',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.07,
+    shadowRadius: 20,
+    elevation: 5,
+  },
+  heroAccentBar: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 4,
+    backgroundColor: THEME.primary,
   },
   heroHeader: {
     flexDirection: 'row',
@@ -2028,18 +2091,32 @@ const styles = StyleSheet.create({
   },
   timerBox: {
     alignItems: 'center',
-    marginVertical: 18,
+    marginVertical: 16,
+  },
+  timerPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.background,
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  timerDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    marginRight: 6,
   },
   timerLabel: {
-    fontSize: 13,
-    color: THEME.textTertiary,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 6,
+    fontSize: 12,
+    color: THEME.textSecondary,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   timerValue: {
-    fontSize: 52,
-    fontWeight: '300',
+    fontSize: 48,
+    fontWeight: '200',
     color: THEME.text,
     fontVariant: ['tabular-nums'],
   },
@@ -2052,18 +2129,19 @@ const styles = StyleSheet.create({
   statCard: {
     width: (SCREEN_W - 64) / 2,
     backgroundColor: THEME.background,
-    borderRadius: 20,
-    paddingVertical: 16,
+    borderRadius: 18,
+    paddingVertical: 14,
     paddingHorizontal: 12,
     alignItems: 'center',
-    marginBottom: 12,
-    borderLeftWidth: 4,
-    borderLeftColor: THEME.primary,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 1,
+    marginBottom: 10,
+  },
+  statIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
   },
   statValue: {
     fontSize: 22,
@@ -2114,16 +2192,56 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: THEME.primary,
   },
-  modelRow: {
+  confidenceGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 14,
+  },
+  confidenceChip: {
+    flex: 1,
+    borderRadius: 12,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginHorizontal: 3,
+  },
+  confidenceLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  confidenceValue: {
+    fontSize: 16,
+    fontWeight: '800',
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
+  },
+  topClassRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: 12,
+    backgroundColor: THEME.card,
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
   },
-  modelText: {
+  topClassText: {
+    fontSize: 12,
+    color: THEME.textSecondary,
     marginLeft: 6,
-    textAlign: 'left',
+    fontWeight: '600',
+  },
+  intensityText: {
+    fontSize: 12,
+    fontWeight: '700',
+    marginLeft: 4,
+  },
+  maxVolumeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
   },
   intensityBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
     alignSelf: 'flex-start',
     borderRadius: 8,
     paddingVertical: 4,
@@ -2176,11 +2294,19 @@ const styles = StyleSheet.create({
     flex: 1,
     marginHorizontal: 6,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 3,
+    shadowColor: '#1A2B3C',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  navIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 6,
   },
   navButtonText: {
     fontSize: 14,
@@ -2224,11 +2350,11 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
+    shadowColor: '#1A2B3C',
     shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.06,
+    shadowOpacity: 0.05,
     shadowRadius: 10,
-    elevation: 3,
+    elevation: 2,
   },
   historyRow: {
     flexDirection: 'row',
@@ -2283,7 +2409,7 @@ const styles = StyleSheet.create({
     backgroundColor: THEME.card,
     borderRadius: 24,
     padding: 20,
-    shadowColor: '#000',
+    shadowColor: '#1A2B3C',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
     shadowRadius: 8,
