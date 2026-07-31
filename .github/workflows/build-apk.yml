@@ -47,3 +47,20 @@ jobs:
         with:
           name: app-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v$VERSION"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" android/app/build/outputs/apk/debug/app-debug.apk --clobber --repo "${{ github.repository }}"
+          else
+            gh release create "$TAG" android/app/build/outputs/apk/debug/app-debug.apk \
+              --title "$TAG" \
+              --notes "自动构建版本 $TAG" \
+              --target "${{ github.sha }}" \
+              --repo "${{ github.repository }}"
+          fi
