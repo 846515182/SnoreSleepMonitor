@@ -61,7 +61,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.4';
+const CURRENT_VERSION = '1.1.5';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -343,11 +343,13 @@ export default function App() {
   const checkInstallPermission = async (): Promise<boolean> => {
     if (Platform.OS !== 'android') return true;
     if (!Platform.Version || Number(Platform.Version) < 26) return true;
+    const perm = PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES;
+    if (!perm) {
+      // 某些设备/ROM 不支持此权限常量，直接引导用户去设置页手动开启
+      return false;
+    }
     try {
-      const granted = await PermissionsAndroid.check(
-        PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES!
-      );
-      return granted;
+      return await PermissionsAndroid.check(perm);
     } catch (e) {
       console.warn('检查安装权限失败', e);
       return false;
@@ -357,19 +359,28 @@ export default function App() {
   const requestInstallPermission = async (): Promise<boolean> => {
     if (Platform.OS !== 'android') return true;
     if (!Platform.Version || Number(Platform.Version) < 26) return true;
-    try {
-      const result = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES!,
-        {
-          title: '需要安装权限',
-          message: '应用更新需要允许安装未知来源应用，请在系统设置中开启。',
-          buttonNeutral: '稍后询问',
-          buttonNegative: '取消',
-          buttonPositive: '去设置',
-        }
+    const perm = PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES;
+    if (!perm) {
+      // 权限常量不存在，直接引导用户去系统设置开启"安装未知应用"
+      Alert.alert(
+        '需要手动开启权限',
+        '请前往系统设置 → 应用 → 睡眠监测 → 安装未知应用，允许后返回重试。',
+        [
+          { text: '取消', style: 'cancel' },
+          { text: '去设置', onPress: () => Linking.openSettings() },
+        ]
       );
+      return false;
+    }
+    try {
+      const result = await PermissionsAndroid.request(perm, {
+        title: '需要安装权限',
+        message: '应用更新需要允许安装未知来源应用，请在系统设置中开启。',
+        buttonNeutral: '稍后询问',
+        buttonNegative: '取消',
+        buttonPositive: '去设置',
+      });
       if (result === PermissionsAndroid.RESULTS.GRANTED) return true;
-      // 引导用户到设置页手动开启
       Alert.alert(
         '需要手动开启权限',
         '请前往系统设置 → 应用 → 睡眠监测 → 安装未知应用，允许后返回重试。',
@@ -621,16 +632,18 @@ export default function App() {
   const checkPermission = async (): Promise<boolean> => {
     try {
       if (Platform.OS === 'android') {
-        const result = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO!,
-          {
-            title: '需要录音权限',
-            message: '睡眠监测需要访问麦克风以录制鼾声、磨牙等声音。',
-            buttonNeutral: '稍后询问',
-            buttonNegative: '取消',
-            buttonPositive: '允许',
-          }
-        );
+        const perm = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
+        if (!perm) {
+          Alert.alert('权限错误', '无法获取录音权限常量，请检查系统版本。');
+          return false;
+        }
+        const result = await PermissionsAndroid.request(perm, {
+          title: '需要录音权限',
+          message: '睡眠监测需要访问麦克风以录制鼾声、磨牙等声音。',
+          buttonNeutral: '稍后询问',
+          buttonNegative: '取消',
+          buttonPositive: '允许',
+        });
         return result === PermissionsAndroid.RESULTS.GRANTED;
       } else {
         const { status } = await Audio.requestPermissionsAsync();

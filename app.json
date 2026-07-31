@@ -2,7 +2,7 @@
   "expo": {
     "name": "SnoreSleepMonitor",
     "slug": "SnoreSleepMonitor",
-    "version": "1.1.4",
+    "version": "1.1.5",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.snoresleep.monitor",
-      "versionCode": 5,
+      "versionCode": 6,
       "adaptiveIcon": {
         "backgroundColor": "#F5F7FA",
         "foregroundImage": "./assets/android-icon-foreground.png",
