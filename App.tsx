@@ -15,11 +15,13 @@ import {
   ActivityIndicator,
   Linking,
   StatusBar as RNStatusBar,
+  Modal,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
+import * as IntentLauncher from 'expo-intent-launcher';
 
 // 原生音频模块（Android 专用，用 MediaRecorder.getMaxAmplitude 获取实时音量）
 const AudioMeter = NativeModules.AudioMeter;
@@ -49,7 +51,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.0.3';
+const CURRENT_VERSION = '1.0.4';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -166,6 +168,9 @@ export default function App() {
   const [isReady, setIsReady] = useState(false);
   const [latestRelease, setLatestRelease] = useState<LatestRelease | null>(null);
   const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'available' | 'latest' | 'error'>('idle');
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [downloadStatus, setDownloadStatus] = useState('准备下载…');
 
   const recordingRef = useRef<Audio.Recording | null>(null);
   const recordingUriRef = useRef<string>('');
@@ -225,7 +230,7 @@ export default function App() {
         `当前版本：${CURRENT_VERSION}\n最新版本：${release.version}\n\n是否立即下载更新？`,
         [
           { text: '稍后再说', style: 'cancel' },
-          { text: '立即更新', onPress: () => openUpdateUrl(release.downloadUrl) },
+          { text: '立即更新', onPress: () => downloadAndInstallApk(release.downloadUrl) },
         ]
       );
     } else {
@@ -246,6 +251,74 @@ export default function App() {
       }
     } catch (e) {
       Alert.alert('打开链接失败', String(e));
+    }
+  };
+
+  const downloadAndInstallApk = async (url: string) => {
+    if (Platform.OS !== 'android') {
+      openUpdateUrl(url);
+      return;
+    }
+
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setDownloadStatus('准备下载…');
+
+    try {
+      // 请求存储权限（Android 6.0-9.0 下载到缓存外需要，这里先顺手申请）
+      if (Platform.Version && Number(Platform.Version) < 29) {
+        try {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+        } catch {
+          // 忽略权限申请失败，缓存目录不需要此权限
+        }
+      }
+
+      const fileName = `update_${Date.now()}.apk`;
+      const fileUri = FileSystem.cacheDirectory + fileName;
+
+      setDownloadStatus('正在下载…');
+      const downloadResumable = FileSystem.createDownloadResumable(
+        url,
+        fileUri,
+        {},
+        (progress) => {
+          const total = progress.totalBytesExpectedToWrite || 1;
+          const written = progress.totalBytesWritten || 0;
+          const pct = Math.min(1, Math.max(0, written / total));
+          setDownloadProgress(pct);
+          setDownloadStatus(`正在下载… ${Math.round(pct * 100)}%`);
+        }
+      );
+
+      const result = await downloadResumable.downloadAsync();
+      if (!result) {
+        throw new Error('下载失败，请检查网络');
+      }
+
+      setDownloadStatus('下载完成，准备安装…');
+      setDownloadProgress(1);
+
+      // 获取 content:// URI 并启动安装界面
+      const contentUri = await FileSystem.getContentUriAsync(result.uri);
+      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
+        data: contentUri,
+        type: 'application/vnd.android.package-archive',
+        flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+      });
+
+      setIsDownloading(false);
+    } catch (e) {
+      setIsDownloading(false);
+      console.warn('下载或安装失败', e);
+      Alert.alert(
+        '更新失败',
+        `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n\n是否改用浏览器下载？`,
+        [
+          { text: '取消', style: 'cancel' },
+          { text: '浏览器下载', onPress: () => openUpdateUrl(url) },
+        ]
+      );
     }
   };
 
@@ -1099,6 +1172,31 @@ export default function App() {
       {screen === 'history' && renderHistory()}
       {screen === 'detail' && renderDetail()}
       {screen === 'settings' && renderSettings()}
+
+      <Modal
+        transparent
+        animationType="fade"
+        visible={isDownloading}
+        onRequestClose={() => {}}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.updateModal}>
+            <Text style={styles.updateModalTitle}>正在下载更新</Text>
+            <Text style={styles.updateModalStatus}>{downloadStatus}</Text>
+            <View style={styles.progressTrack}>
+              <View
+                style={[
+                  styles.progressFill,
+                  { width: `${Math.round(downloadProgress * 100)}%` },
+                ]}
+              />
+            </View>
+            <Text style={styles.updateModalPercent}>
+              {Math.round(downloadProgress * 100)}%
+            </Text>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -1456,5 +1554,54 @@ const styles = StyleSheet.create({
     color: '#1A2B3C',
     minWidth: 80,
     textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  updateModal: {
+    width: '100%',
+    maxWidth: 320,
+    backgroundColor: '#fff',
+    borderRadius: 20,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  updateModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1A2B3C',
+    marginBottom: 8,
+  },
+  updateModalStatus: {
+    fontSize: 14,
+    color: '#7A8B9C',
+    marginBottom: 16,
+  },
+  progressTrack: {
+    width: '100%',
+    height: 10,
+    backgroundColor: '#E8EDF2',
+    borderRadius: 5,
+    overflow: 'hidden',
+    marginBottom: 12,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: '#4ECDC4',
+    borderRadius: 5,
+  },
+  updateModalPercent: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#4ECDC4',
   },
 });
