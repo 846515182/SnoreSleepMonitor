@@ -51,7 +51,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.0.4';
+const CURRENT_VERSION = '1.0.5';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -184,6 +184,7 @@ export default function App() {
   const lastEventEndRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
+  const downloadResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
 
   // 加载设置与历史
   useEffect(() => {
@@ -254,9 +255,28 @@ export default function App() {
     }
   };
 
+  const cancelDownload = async () => {
+    try {
+      if (downloadResumableRef.current) {
+        await downloadResumableRef.current.cancelAsync();
+        downloadResumableRef.current = null;
+      }
+    } catch (e) {
+      console.warn('取消下载失败', e);
+    }
+    setIsDownloading(false);
+    setDownloadProgress(0);
+    setDownloadStatus('已取消下载');
+  };
+
   const downloadAndInstallApk = async (url: string) => {
     if (Platform.OS !== 'android') {
       openUpdateUrl(url);
+      return;
+    }
+
+    if (isDownloading) {
+      Alert.alert('下载中', '已有更新任务在下载，请等待完成。');
       return;
     }
 
@@ -278,7 +298,7 @@ export default function App() {
       const fileUri = FileSystem.cacheDirectory + fileName;
 
       setDownloadStatus('正在下载…');
-      const downloadResumable = FileSystem.createDownloadResumable(
+      downloadResumableRef.current = FileSystem.createDownloadResumable(
         url,
         fileUri,
         {},
@@ -291,7 +311,8 @@ export default function App() {
         }
       );
 
-      const result = await downloadResumable.downloadAsync();
+      const result = await downloadResumableRef.current.downloadAsync();
+      downloadResumableRef.current = null;
       if (!result) {
         throw new Error('下载失败，请检查网络');
       }
@@ -309,7 +330,9 @@ export default function App() {
 
       setIsDownloading(false);
     } catch (e) {
+      downloadResumableRef.current = null;
       setIsDownloading(false);
+      setDownloadProgress(0);
       console.warn('下载或安装失败', e);
       Alert.alert(
         '更新失败',
@@ -1151,7 +1174,7 @@ export default function App() {
         {updateCheckState === 'available' && latestRelease && (
           <TouchableOpacity
             style={[styles.mainButton, styles.startButton, { marginBottom: 12 }]}
-            onPress={() => openUpdateUrl(latestRelease.downloadUrl)}
+            onPress={() => downloadAndInstallApk(latestRelease.downloadUrl)}
           >
             <Text style={styles.mainButtonText}>下载最新版本 APK</Text>
           </TouchableOpacity>
@@ -1194,6 +1217,12 @@ export default function App() {
             <Text style={styles.updateModalPercent}>
               {Math.round(downloadProgress * 100)}%
             </Text>
+            <TouchableOpacity
+              style={[styles.mainButton, styles.stopButton, { marginTop: 16, paddingVertical: 12 }]}
+              onPress={cancelDownload}
+            >
+              <Text style={styles.mainButtonText}>取消下载</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>

@@ -1,6 +1,6 @@
 {
   "name": "snoresleepmonitor",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "main": "index.ts",
   "dependencies": {
     "@expo/metro-runtime": "~3.2.3",
