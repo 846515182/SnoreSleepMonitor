@@ -7,7 +7,6 @@ node_modules/
 .expo/
 dist/
 web-build/
-expo-env.d.ts
 
 # Native
 .kotlin/
@@ -42,3 +41,9 @@ yarn-error.*
 
 # apks
 *.apk
+
+# local build/test artifacts
+emulator-test-output/
+emulator-test-output-v2/
+app-debug-artifact.zip
+poll-emulator.js
