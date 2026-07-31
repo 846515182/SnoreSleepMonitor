@@ -31,7 +31,8 @@ interface SoundEvent {
   start: number; // 相对会话开始的毫秒数
   end: number;
   duration: number; // 毫秒
-  type: 'snore' | 'grind'; // 打鼾 | 磨牙
+  type: 'snore' | 'grind' | 'talk' | 'apnea'; // 打鼾 | 磨牙 | 梦话 | 呼吸暂停
+  intensity?: 'mild' | 'moderate' | 'severe'; // 仅用于打鼾强度分级
 }
 
 interface SleepSession {
@@ -42,31 +43,40 @@ interface SleepSession {
   events: SoundEvent[];
   snoreCount: number;
   grindCount: number;
+  talkCount: number;
+  apneaCount: number;
   totalSnoreSeconds: number;
   totalGrindSeconds: number;
+  totalTalkSeconds: number;
+  totalApneaSeconds: number;
   recordingUri?: string;
   qualityScore: number; // 0-100
+  apneaRisk?: 'low' | 'moderate' | 'high'; // 呼吸暂停筛查风险
+  intensityBreakdown?: { mild: number; moderate: number; severe: number }; // 鼾声强度分布
 }
 
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.0.5';
+const CURRENT_VERSION = '1.1.0';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
-const DEFAULT_SNORE_CONFIDENCE = 0.5; // 默认鼾声置信度阈值（50%）
-const DEFAULT_GRIND_CONFIDENCE = 0.35; // 默认磨牙启发式阈值（响度比例）
+const DEFAULT_SNORE_CONFIDENCE = 0.45; // 默认鼾声置信度阈值（YAMNet 更准，可适当放宽）
+const DEFAULT_GRIND_CONFIDENCE = 0.35; // 默认磨牙置信度阈值
+const DEFAULT_TALK_CONFIDENCE = 0.5; // 默认梦话置信度阈值
+const DEFAULT_APNEA_CONFIDENCE = 0.45; // 默认呼吸暂停（Gasp 等）置信度阈值
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
-const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒即可
+const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒
 const MIN_GRIND_MS = 300; // 最小磨牙持续时间 0.3 秒
 const MAX_GRIND_MS = 1500; // 磨牙事件一般不超过 1.5 秒
-const GRIND_LOUD_DB = -42; // 启发式磨牙检测的最小响度
+const MIN_TALK_MS = 500; // 最小梦话持续时间 0.5 秒
+const MIN_APNEA_MS = 200; // 最小呼吸暂停事件 0.2 秒
+const MAX_APNEA_MS = 2000; // 呼吸暂停事件一般不超过 2 秒
 const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
-const COOLDOWN_MS = 500; // 事件冷却间隔缩短
 
 // 辅助函数
 function formatDuration(totalSeconds: number): string {
@@ -153,14 +163,20 @@ export default function App() {
   const [snoreThreshold, setSnoreThreshold] = useState(DEFAULT_SNORE_CONFIDENCE);
   const [grindThreshold, setGrindThreshold] = useState(DEFAULT_GRIND_CONFIDENCE);
   const [snoreConfidence, setSnoreConfidence] = useState(0);
+  const [grindConfidence, setGrindConfidence] = useState(0);
+  const [talkConfidence, setTalkConfidence] = useState(0);
+  const [apneaConfidence, setApneaConfidence] = useState(0);
   const [topClass, setTopClass] = useState('noise');
   const [topConfidence, setTopConfidence] = useState(0);
   const [confidences, setConfidences] = useState<Record<string, number>>({});
   const [isSnoringNow, setIsSnoringNow] = useState(false);
+  const [snoreIntensity, setSnoreIntensity] = useState<'mild' | 'moderate' | 'severe' | null>(null);
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [snoreCount, setSnoreCount] = useState(0);
   const [grindCount, setGrindCount] = useState(0);
+  const [talkCount, setTalkCount] = useState(0);
+  const [apneaCount, setApneaCount] = useState(0);
   const [totalNoiseSeconds, setTotalNoiseSeconds] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
@@ -180,8 +196,11 @@ export default function App() {
   const eventsRef = useRef<SoundEvent[]>([]);
   const currentEventRef = useRef<SoundEvent | null>(null);
   const currentSnoreFramesRef = useRef<number>(0);
+  const currentGrindFramesRef = useRef<number>(0);
+  const currentTalkFramesRef = useRef<number>(0);
+  const currentApneaFramesRef = useRef<number>(0);
   const currentTotalFramesRef = useRef<number>(0);
-  const lastEventEndRef = useRef<number>(0);
+  const currentMaxSnoreConfRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
   const downloadResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
@@ -350,8 +369,23 @@ export default function App() {
       const raw = await AsyncStorage.getItem(STORAGE_KEY);
       if (raw) {
         const parsed: SleepSession[] = JSON.parse(raw);
-        parsed.sort((a, b) => b.startTime - a.startTime);
-        setSessions(parsed);
+        // 兼容旧数据：新版本字段不存在时补默认值
+        const normalized = parsed.map((s) => ({
+          ...s,
+          talkCount: s.talkCount ?? 0,
+          apneaCount: s.apneaCount ?? 0,
+          totalTalkSeconds: s.totalTalkSeconds ?? 0,
+          totalApneaSeconds: s.totalApneaSeconds ?? 0,
+          apneaRisk: s.apneaRisk ?? 'low',
+          intensityBreakdown: s.intensityBreakdown ?? { mild: 0, moderate: 0, severe: 0 },
+          events: (s.events || []).map((e) => ({
+            ...e,
+            type: e.type || 'snore',
+            intensity: e.intensity,
+          })),
+        }));
+        normalized.sort((a, b) => b.startTime - a.startTime);
+        setSessions(normalized);
       }
     } catch (e) {
       console.warn('加载历史失败', e);
@@ -477,18 +511,26 @@ export default function App() {
       setElapsedSeconds(0);
       setSnoreCount(0);
       setGrindCount(0);
+      setTalkCount(0);
+      setApneaCount(0);
       setTotalNoiseSeconds(0);
-      setIsMonitoring(true);
       setVolumeDb(-100);
       setSnoreConfidence(0);
+      setGrindConfidence(0);
+      setTalkConfidence(0);
+      setApneaConfidence(0);
       setTopClass('noise');
       setTopConfidence(0);
       setConfidences({});
+      setSnoreIntensity(null);
       eventsRef.current = [];
       currentEventRef.current = null;
       currentSnoreFramesRef.current = 0;
+      currentGrindFramesRef.current = 0;
+      currentTalkFramesRef.current = 0;
+      currentApneaFramesRef.current = 0;
       currentTotalFramesRef.current = 0;
-      lastEventEndRef.current = 0;
+      currentMaxSnoreConfRef.current = 0;
       lastLoudTimeRef.current = 0;
       maxVolumeDbRef.current = -100;
       setMaxVolumeDb(-100);
@@ -513,20 +555,32 @@ export default function App() {
   const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
   const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
 
+  const classifyIntensity = (conf: number): 'mild' | 'moderate' | 'severe' => {
+    if (conf >= 0.75) return 'severe';
+    if (conf >= 0.55) return 'moderate';
+    return 'mild';
+  };
+
   const monitorLoop = async () => {
-    // 原生模块路径：使用 TFLite 鼾声检测模型
+    // 原生模块路径：使用 YAMNet 多分类模型
     if (useNativeMeterRef.current && AudioMeter) {
       try {
         const result = await AudioMeter.getLatestResult();
         const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
-        const sConf = typeof result.snoreConfidence === 'number' ? result.snoreConfidence : 0;
-        const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
-        const tConf = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
         const confs: Record<string, number> = result.confidences || {};
+        const sConf = confs.snoring ?? 0;
+        const gConf = confs.grinding ?? 0;
+        const tConf = confs.talking ?? 0;
+        const aConf = confs.apnea ?? 0;
+        const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
+        const tConfAll = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
         setVolumeDb(metering);
         setSnoreConfidence(sConf);
+        setGrindConfidence(gConf);
+        setTalkConfidence(tConf);
+        setApneaConfidence(aConf);
         setTopClass(tClass);
-        setTopConfidence(tConf);
+        setTopConfidence(tConfAll);
         setConfidences(confs);
         if (metering > maxVolumeDbRef.current) {
           maxVolumeDbRef.current = metering;
@@ -537,14 +591,20 @@ export default function App() {
         const sessionElapsed = now - startTimeRef.current;
         setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-        // Native has already applied a 0.5 internal threshold for isSnoring.
-        // JS applies the user-defined snoreThreshold on top to control sensitivity.
-        const isSnoreFrame = !!result.isSnoring && sConf >= snoreThreshold;
-        // Heuristic grind frame: loud enough, not snoring, and snore confidence is well below threshold.
-        const isGrindFrame =
-          !isSnoreFrame && metering >= GRIND_LOUD_DB && sConf < snoreThreshold * (1 - grindThreshold);
-        setIsSnoringNow(isSnoreFrame || isGrindFrame);
-        detectEvent(isSnoreFrame, isGrindFrame, sessionElapsed);
+        // 按当前 top 类别做阈值判断，避免同一帧被重复归类
+        const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
+        const isGrindFrame = tClass === 'grinding' && gConf >= grindThreshold;
+        const isTalkFrame = tClass === 'talking' && tConf >= DEFAULT_TALK_CONFIDENCE;
+        const isApneaFrame = tClass === 'apnea' && aConf >= DEFAULT_APNEA_CONFIDENCE;
+        const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
+
+        if (isSnoreFrame) {
+          setSnoreIntensity(classifyIntensity(sConf));
+        } else if (!isLoud) {
+          setSnoreIntensity(null);
+        }
+        setIsSnoringNow(isLoud);
+        detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, isApneaFrame, sessionElapsed, sConf);
       } catch (e) {
         console.warn('原生监测循环异常', e);
       }
@@ -555,9 +615,13 @@ export default function App() {
     const metering = lastMeteringRef.current;
     setVolumeDb(metering);
     setSnoreConfidence(0);
+    setGrindConfidence(0);
+    setTalkConfidence(0);
+    setApneaConfidence(0);
     setTopClass('noise');
     setTopConfidence(0);
     setConfidences({});
+    setSnoreIntensity(null);
     if (metering > maxVolumeDbRef.current) {
       maxVolumeDbRef.current = metering;
       setMaxVolumeDb(metering);
@@ -570,13 +634,19 @@ export default function App() {
     // Fallback path has no TFLite model, so all loud events are treated as snores.
     const isLoud = metering >= FALLBACK_THRESHOLD_DB;
     setIsSnoringNow(isLoud);
-    detectEvent(isLoud, false, sessionElapsed);
+    detectEvent(isLoud, false, false, false, sessionElapsed, 0);
   };
 
-  // 事件检测：按帧标记为鼾声/磨牙/静音，事件结束时根据帧比例与持续时间分类。
-  // 当前 TFLite 模型只有 noise/snoring 两类，因此磨牙是通过“短时、响亮、非鼾声”的启发式规则推断的。
-  const detectEvent = (isSnoreFrame: boolean, isGrindFrame: boolean, sessionElapsed: number) => {
-    const isLoud = isSnoreFrame || isGrindFrame;
+  // 事件检测：按帧标记为鼾声/磨牙/梦话/呼吸暂停，事件结束时根据帧比例与持续时间分类。
+  const detectEvent = (
+    isSnoreFrame: boolean,
+    isGrindFrame: boolean,
+    isTalkFrame: boolean,
+    isApneaFrame: boolean,
+    sessionElapsed: number,
+    snoreConf: number
+  ) => {
+    const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
 
     if (isLoud) {
       lastLoudTimeRef.current = sessionElapsed;
@@ -585,15 +655,27 @@ export default function App() {
           start: sessionElapsed,
           end: sessionElapsed,
           duration: 0,
-          type: isSnoreFrame ? 'snore' : 'grind',
+          type: 'snore',
         };
         currentSnoreFramesRef.current = isSnoreFrame ? 1 : 0;
+        currentGrindFramesRef.current = isGrindFrame ? 1 : 0;
+        currentTalkFramesRef.current = isTalkFrame ? 1 : 0;
+        currentApneaFramesRef.current = isApneaFrame ? 1 : 0;
         currentTotalFramesRef.current = 1;
+        currentMaxSnoreConfRef.current = isSnoreFrame ? snoreConf : 0;
       } else {
         currentEventRef.current.end = sessionElapsed;
         currentEventRef.current.duration = sessionElapsed - currentEventRef.current.start;
         currentTotalFramesRef.current += 1;
-        if (isSnoreFrame) currentSnoreFramesRef.current += 1;
+        if (isSnoreFrame) {
+          currentSnoreFramesRef.current += 1;
+          if (snoreConf > currentMaxSnoreConfRef.current) {
+            currentMaxSnoreConfRef.current = snoreConf;
+          }
+        }
+        if (isGrindFrame) currentGrindFramesRef.current += 1;
+        if (isTalkFrame) currentTalkFramesRef.current += 1;
+        if (isApneaFrame) currentApneaFramesRef.current += 1;
       }
     } else {
       // 静音时，只有超过宽限期才结束当前事件
@@ -613,18 +695,26 @@ export default function App() {
     if (!evt) return;
 
     const duration = evt.end - evt.start;
-    const snoreRatio =
-      currentTotalFramesRef.current > 0
-        ? currentSnoreFramesRef.current / currentTotalFramesRef.current
-        : 0;
+    const total = currentTotalFramesRef.current;
+    const snoreRatio = total > 0 ? currentSnoreFramesRef.current / total : 0;
+    const grindRatio = total > 0 ? currentGrindFramesRef.current / total : 0;
+    const talkRatio = total > 0 ? currentTalkFramesRef.current / total : 0;
+    const apneaRatio = total > 0 ? currentApneaFramesRef.current / total : 0;
 
-    let type: 'snore' | 'grind' = 'snore';
+    let type: SoundEvent['type'] = 'snore';
     let valid = false;
 
     if (snoreRatio >= 0.5 && duration >= MIN_SNORE_MS) {
       type = 'snore';
       valid = true;
-    } else if (duration >= MIN_GRIND_MS && duration <= MAX_GRIND_MS && snoreRatio < 0.35) {
+      evt.intensity = classifyIntensity(currentMaxSnoreConfRef.current);
+    } else if (apneaRatio >= 0.5 && duration >= MIN_APNEA_MS && duration <= MAX_APNEA_MS) {
+      type = 'apnea';
+      valid = true;
+    } else if (talkRatio >= 0.5 && duration >= MIN_TALK_MS) {
+      type = 'talk';
+      valid = true;
+    } else if (grindRatio >= 0.5 && duration >= MIN_GRIND_MS && duration <= MAX_GRIND_MS) {
       type = 'grind';
       valid = true;
     }
@@ -633,13 +723,18 @@ export default function App() {
       evt.type = type;
       eventsRef.current.push({ ...evt });
       if (type === 'snore') setSnoreCount((c) => c + 1);
-      else setGrindCount((c) => c + 1);
-      lastEventEndRef.current = evt.end;
+      else if (type === 'grind') setGrindCount((c) => c + 1);
+      else if (type === 'talk') setTalkCount((c) => c + 1);
+      else if (type === 'apnea') setApneaCount((c) => c + 1);
     }
 
     currentEventRef.current = null;
     currentSnoreFramesRef.current = 0;
+    currentGrindFramesRef.current = 0;
+    currentTalkFramesRef.current = 0;
+    currentApneaFramesRef.current = 0;
     currentTotalFramesRef.current = 0;
+    currentMaxSnoreConfRef.current = 0;
   };
 
   const stopMonitoring = async () => {
@@ -683,9 +778,27 @@ export default function App() {
 
       const snoreEvents = eventsRef.current.filter((e) => e.type === 'snore');
       const grindEvents = eventsRef.current.filter((e) => e.type === 'grind');
+      const talkEvents = eventsRef.current.filter((e) => e.type === 'talk');
+      const apneaEvents = eventsRef.current.filter((e) => e.type === 'apnea');
       const totalSnoreMs = snoreEvents.reduce((sum, e) => sum + e.duration, 0);
       const totalGrindMs = grindEvents.reduce((sum, e) => sum + e.duration, 0);
-      const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs) / 1000);
+      const totalTalkMs = talkEvents.reduce((sum, e) => sum + e.duration, 0);
+      const totalApneaMs = apneaEvents.reduce((sum, e) => sum + e.duration, 0);
+      const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs + totalTalkMs + totalApneaMs) / 1000);
+
+      // 鼾声强度分布
+      const intensityBreakdown = {
+        mild: snoreEvents.filter((e) => e.intensity === 'mild').length,
+        moderate: snoreEvents.filter((e) => e.intensity === 'moderate').length,
+        severe: snoreEvents.filter((e) => e.intensity === 'severe').length,
+      };
+
+      // 呼吸暂停风险指数（AHI 简化版：事件数 / 睡眠小时数）
+      const hours = durationSeconds / 3600;
+      const ahi = hours > 0 ? apneaEvents.length / hours : 0;
+      let apneaRisk: SleepSession['apneaRisk'] = 'low';
+      if (ahi >= 15) apneaRisk = 'high';
+      else if (ahi >= 5) apneaRisk = 'moderate';
 
       const session: SleepSession = {
         id: `${startTimeRef.current}`,
@@ -695,10 +808,16 @@ export default function App() {
         events: eventsRef.current,
         snoreCount: snoreEvents.length,
         grindCount: grindEvents.length,
+        talkCount: talkEvents.length,
+        apneaCount: apneaEvents.length,
         totalSnoreSeconds: Math.floor(totalSnoreMs / 1000),
         totalGrindSeconds: Math.floor(totalGrindMs / 1000),
+        totalTalkSeconds: Math.floor(totalTalkMs / 1000),
+        totalApneaSeconds: Math.floor(totalApneaMs / 1000),
         recordingUri: uri,
         qualityScore: calculateQualityScore(durationSeconds, totalNoiseSec),
+        apneaRisk,
+        intensityBreakdown,
       };
 
       const updated = [session, ...sessions];
@@ -715,9 +834,13 @@ export default function App() {
     setIsBusy(false);
     setVolumeDb(-100);
     setSnoreConfidence(0);
+    setGrindConfidence(0);
+    setTalkConfidence(0);
+    setApneaConfidence(0);
     setTopClass('noise');
     setTopConfidence(0);
     setConfidences({});
+    setSnoreIntensity(null);
     setIsSnoringNow(false);
   };
 
@@ -818,7 +941,7 @@ export default function App() {
     <ScrollView contentContainerStyle={styles.homeContent}>
       <View style={styles.card}>
         <Text style={styles.title}>睡眠监测</Text>
-        <Text style={styles.subtitle}>记录打鼾、磨牙与整晚录音</Text>
+        <Text style={styles.subtitle}>记录打鼾、磨牙、梦话、呼吸暂停与整晚录音</Text>
 
         {hasPermission === false && (
           <View style={styles.warningBox}>
@@ -835,15 +958,19 @@ export default function App() {
         <View style={styles.statsRow}>
           <View style={styles.statBox}>
             <Text style={styles.statValue}>{snoreCount}</Text>
-            <Text style={styles.statLabel}>打鼾次数</Text>
+            <Text style={styles.statLabel}>打鼾</Text>
           </View>
           <View style={styles.statBox}>
             <Text style={styles.statValue}>{grindCount}</Text>
-            <Text style={styles.statLabel}>磨牙次数</Text>
+            <Text style={styles.statLabel}>磨牙</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>{formatDuration(totalNoiseSeconds)}</Text>
-            <Text style={styles.statLabel}>异常声音时长</Text>
+            <Text style={styles.statValue}>{talkCount}</Text>
+            <Text style={styles.statLabel}>梦话</Text>
+          </View>
+          <View style={styles.statBox}>
+            <Text style={styles.statValue}>{apneaCount}</Text>
+            <Text style={styles.statLabel}>呼吸暂停</Text>
           </View>
         </View>
 
@@ -873,8 +1000,13 @@ export default function App() {
             本次最大音量: {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
           </Text>
           <Text style={[styles.volumeDb, { color: '#4ECDC4', marginTop: 4 }]}>
-            模型结果: {topClass} {(topConfidence * 100).toFixed(1)}% · 鼾声置信度 {(snoreConfidence * 100).toFixed(1)}%
+            模型: {topClass} {(topConfidence * 100).toFixed(1)}% · 鼾{(snoreConfidence * 100).toFixed(0)}% 磨{(grindConfidence * 100).toFixed(0)}% 话{(talkConfidence * 100).toFixed(0)}% 停{(apneaConfidence * 100).toFixed(0)}%
           </Text>
+          {snoreIntensity && (
+            <Text style={[styles.volumeDb, { color: getIntensityColor(snoreIntensity), marginTop: 4 }]}>
+              鼾声强度: {getIntensityLabel(snoreIntensity)}
+            </Text>
+          )}
         </View>
 
         <TouchableOpacity
@@ -946,7 +1078,7 @@ export default function App() {
               <View>
                 <Text style={styles.historyTime}>{formatTime(item.startTime)}</Text>
                 <Text style={styles.historyMeta}>
-                  睡眠 {formatDuration(item.durationSeconds)} · 打鼾 {item.snoreCount} 次 · 磨牙 {item.grindCount} 次
+                  睡眠 {formatDuration(item.durationSeconds)} · 鼾{item.snoreCount} · 磨{item.grindCount} · 话{item.talkCount} · 停{item.apneaCount}
                 </Text>
               </View>
               <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore) }]}>
@@ -980,17 +1112,56 @@ export default function App() {
             </View>
             <View style={styles.detailStat}>
               <Text style={styles.detailStatValue}>{selectedSession.snoreCount}</Text>
-              <Text style={styles.detailStatLabel}>打鼾次数</Text>
+              <Text style={styles.detailStatLabel}>打鼾</Text>
             </View>
             <View style={styles.detailStat}>
               <Text style={styles.detailStatValue}>{selectedSession.grindCount}</Text>
-              <Text style={styles.detailStatLabel}>磨牙次数</Text>
+              <Text style={styles.detailStatLabel}>磨牙</Text>
+            </View>
+          </View>
+
+          <View style={styles.detailStats}>
+            <View style={styles.detailStat}>
+              <Text style={styles.detailStatValue}>{selectedSession.talkCount}</Text>
+              <Text style={styles.detailStatLabel}>梦话</Text>
+            </View>
+            <View style={styles.detailStat}>
+              <Text style={styles.detailStatValue}>{selectedSession.apneaCount}</Text>
+              <Text style={styles.detailStatLabel}>呼吸暂停</Text>
+            </View>
+            <View style={styles.detailStat}>
+              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalSnoreSeconds)}</Text>
+              <Text style={styles.detailStatLabel}>鼾声时长</Text>
             </View>
           </View>
 
           <View style={[styles.qualityBadgeLarge, { backgroundColor: getQualityColor(selectedSession.qualityScore) }]}>
             <Text style={styles.qualityTextLarge}>睡眠质量 {selectedSession.qualityScore} 分</Text>
           </View>
+
+          <View style={[styles.qualityBadgeLarge, { backgroundColor: getApneaRiskColor(selectedSession.apneaRisk || 'low'), marginTop: -12 }]}>
+            <Text style={styles.qualityTextLarge}>呼吸暂停风险 {getApneaRiskLabel(selectedSession.apneaRisk || 'low')}</Text>
+          </View>
+
+          {selectedSession.intensityBreakdown && selectedSession.snoreCount > 0 && (
+            <View style={{ marginBottom: 20 }}>
+              <Text style={styles.sectionTitle}>鼾声强度分布</Text>
+              <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
+                <View style={styles.detailStat}>
+                  <Text style={[styles.detailStatValue, { color: '#2ECC71' }]}>{selectedSession.intensityBreakdown.mild}</Text>
+                  <Text style={styles.detailStatLabel}>轻度</Text>
+                </View>
+                <View style={styles.detailStat}>
+                  <Text style={[styles.detailStatValue, { color: '#F1C40F' }]}>{selectedSession.intensityBreakdown.moderate}</Text>
+                  <Text style={styles.detailStatLabel}>中度</Text>
+                </View>
+                <View style={styles.detailStat}>
+                  <Text style={[styles.detailStatValue, { color: '#E74C3C' }]}>{selectedSession.intensityBreakdown.severe}</Text>
+                  <Text style={styles.detailStatLabel}>重度</Text>
+                </View>
+              </View>
+            </View>
+          )}
 
           {selectedSession.recordingUri ? (
             <View style={styles.recordingBox}>
@@ -1030,7 +1201,7 @@ export default function App() {
 
           <Text style={styles.sectionTitle}>异常声音事件（点击跳转播放）</Text>
           {selectedSession.events.length === 0 ? (
-            <Text style={styles.noRecordingText}>未检测到打鼾或磨牙事件</Text>
+            <Text style={styles.noRecordingText}>未检测到异常声音事件</Text>
           ) : (
             selectedSession.events.map((evt, idx) => {
               const absStart = selectedSession.startTime + evt.start;
@@ -1043,8 +1214,8 @@ export default function App() {
                   onPress={() => selectedSession.recordingUri && seekToEvent(evt)}
                   disabled={!selectedSession.recordingUri}
                 >
-                  <Text style={[styles.eventIndex, evt.type === 'grind' ? { color: '#F1C40F' } : {}]}>
-                    #{idx + 1} {evt.type === 'snore' ? '打鼾' : '磨牙'}
+                  <Text style={[styles.eventIndex, { color: getEventColor(evt.type) }]}>
+                    #{idx + 1} {getEventLabel(evt.type, evt.intensity)}
                   </Text>
                   <View style={{ flex: 1 }}>
                     <Text style={styles.eventClock}>{formatClock(absStart)}</Text>
@@ -1094,9 +1265,9 @@ export default function App() {
       <View style={styles.card}>
         <Text style={styles.sectionTitle}>鼾声检测阈值</Text>
         <Text style={styles.settingsDesc}>
-          原生模块会先对 TFLite 模型输出做一次内部判断：只有“snoring”类别的置信度最高且超过 50% 时，才认为当前这一秒可能是鼾声。
-          在此基础上，App 会再用下方阈值做二次过滤：只有当“snoring”置信度不低于该阈值，且连续满足条件达到最小持续时间，才会被记录为一次打鼾事件。
-          阈值越低越灵敏，可能把环境音误判为鼾声；阈值越高越保守，可能漏掉轻微鼾声。推荐 45%–60%。
+          本版本使用 Google YAMNet 521 类音频模型，原生模块已聚合出“打鼾 / 磨牙 / 梦话 / 呼吸暂停 / 噪音”五类置信度。
+          App 会再用下方阈值做二次过滤：只有当“打鼾”置信度不低于该阈值，且连续满足条件达到最小持续时间，才会被记录为一次打鼾事件。
+          阈值越低越灵敏，可能把环境音误判为鼾声；阈值越高越保守，可能漏掉轻微鼾声。推荐 40%–60%。
         </Text>
         <Text style={styles.thresholdValue}>{(snoreThreshold * 100).toFixed(0)}%</Text>
         <View style={styles.sliderRow}>
@@ -1125,11 +1296,10 @@ export default function App() {
 
         <View style={{ height: 1, backgroundColor: '#E8EDF2', marginVertical: 20 }} />
 
-        <Text style={styles.sectionTitle}>磨牙启发式灵敏度</Text>
+        <Text style={styles.sectionTitle}>磨牙检测阈值</Text>
         <Text style={styles.settingsDesc}>
-          当前 TFLite 模型只包含 noise / snoring 两类，没有专门的磨牙（bruxism）类别。磨牙是通过“短时、响亮、且模型不认为是鼾声”的启发式规则推断的。
-          该灵敏度控制“非鼾声但响亮”的帧被标记为磨牙候选的宽松程度：数值越高，越多的响亮片段会被尝试归类为磨牙；数值越低，越保守，可能把磨牙并入环境音。
-          事件最终还会根据持续时间和鼾声帧比例来判定，因此该选项主要影响候选范围。
+          YAMNet 模型通过“咀嚼 / 咬合”类声音来识别磨牙（bruxism）候选。当“磨牙”聚合置信度不低于该阈值，且事件持续时间在 0.3–1.5 秒之间，才会被记录为一次磨牙。
+          阈值越低越灵敏，可能把翻身、衣物摩擦等误判为磨牙；阈值越高越保守，可能漏掉轻微磨牙。推荐 30%–45%。
         </Text>
         <Text style={styles.thresholdValue}>{(grindThreshold * 100).toFixed(0)}%</Text>
         <View style={styles.sliderRow}>
@@ -1234,6 +1404,60 @@ function getQualityColor(score: number): string {
   if (score >= 85) return '#2ECC71';
   if (score >= 60) return '#F1C40F';
   return '#E74C3C';
+}
+
+function getIntensityColor(intensity: 'mild' | 'moderate' | 'severe'): string {
+  switch (intensity) {
+    case 'severe': return '#E74C3C';
+    case 'moderate': return '#F1C40F';
+    default: return '#2ECC71';
+  }
+}
+
+function getIntensityLabel(intensity: 'mild' | 'moderate' | 'severe'): string {
+  switch (intensity) {
+    case 'severe': return '重度';
+    case 'moderate': return '中度';
+    default: return '轻度';
+  }
+}
+
+function getApneaRiskColor(risk: 'low' | 'moderate' | 'high'): string {
+  switch (risk) {
+    case 'high': return '#E74C3C';
+    case 'moderate': return '#F1C40F';
+    default: return '#2ECC71';
+  }
+}
+
+function getApneaRiskLabel(risk: 'low' | 'moderate' | 'high'): string {
+  switch (risk) {
+    case 'high': return '高风险';
+    case 'moderate': return '中风险';
+    default: return '低风险';
+  }
+}
+
+function getEventColor(type: SoundEvent['type']): string {
+  switch (type) {
+    case 'snore': return '#4ECDC4';
+    case 'grind': return '#F1C40F';
+    case 'talk': return '#9B59B6';
+    case 'apnea': return '#E74C3C';
+    default: return '#7A8B9C';
+  }
+}
+
+function getEventLabel(type: SoundEvent['type'], intensity?: SoundEvent['intensity']): string {
+  const base =
+    type === 'snore' ? '打鼾' :
+    type === 'grind' ? '磨牙' :
+    type === 'talk' ? '梦话' :
+    type === 'apnea' ? '呼吸暂停' : '未知';
+  if (type === 'snore' && intensity) {
+    return `${base}(${getIntensityLabel(intensity)})`;
+  }
+  return base;
 }
 
 const styles = StyleSheet.create({

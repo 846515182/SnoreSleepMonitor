@@ -41,6 +41,7 @@ yarn-error.*
 
 # apks
 *.apk
+apk-output/
 
 # local build/test artifacts
 emulator-test-output/
