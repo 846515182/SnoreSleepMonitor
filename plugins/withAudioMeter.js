@@ -46,8 +46,10 @@ const AUDIO_METER_MODULE_KT = [
   `    private var wavDataBytes: Int = 0`,
   ``,
   `    private val lock = Object()`,
-  `    private var latestSnoreConfidence = 0.0`,
-  `    private var latestNoiseConfidence = 1.0`,
+  `    private var labels = listOf<String>()`,
+  `    private var latestConfidences = emptyMap<String, Double>()`,
+  `    private var latestTopClass = ""`,
+  `    private var latestTopConfidence = 0.0`,
   `    private var latestIsSnoring = false`,
   `    private var latestAmplitudeDb = -100.0`,
   ``,
@@ -58,6 +60,13 @@ const AUDIO_METER_MODULE_KT = [
   `        try {`,
   `            if (ActivityCompat.checkSelfPermission(reactApplicationContext, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {`,
   `                throw SecurityException("RECORD_AUDIO permission not granted")`,
+  `            }`,
+  ``,
+  `            // Load label names from assets. The label file lets the same native code work with`,
+  `            // any TFLite model by reporting class names and confidences generically.`,
+  `            labels = loadLabels()`,
+  `            if (labels.isEmpty()) {`,
+  `                labels = listOf("noise", "snoring")`,
   `            }`,
   ``,
   `            // Copy TFLite model from assets to a regular file for the interpreter`,
@@ -114,9 +123,17 @@ const AUDIO_METER_MODULE_KT = [
   `    @ReactMethod`,
   `    fun getLatestResult(promise: Promise) {`,
   `        val map = Arguments.createMap()`,
+  `        val confidencesMap = Arguments.createMap()`,
   `        synchronized(lock) {`,
-  `            map.putDouble("snoreConfidence", latestSnoreConfidence)`,
-  `            map.putDouble("noiseConfidence", latestNoiseConfidence)`,
+  `            for ((name, value) in latestConfidences) {`,
+  `                confidencesMap.putDouble(name, value)`,
+  `            }`,
+  `            map.putMap("confidences", confidencesMap)`,
+  `            map.putString("topClass", latestTopClass)`,
+  `            map.putDouble("topConfidence", latestTopConfidence)`,
+  `            // Backward-compatible fields`,
+  `            map.putDouble("snoreConfidence", latestConfidences["snoring"] ?: 0.0)`,
+  `            map.putDouble("noiseConfidence", latestConfidences["noise"] ?: 0.0)`,
   `            map.putBoolean("isSnoring", latestIsSnoring)`,
   `            map.putDouble("amplitudeDb", latestAmplitudeDb)`,
   `        }`,
@@ -139,6 +156,17 @@ const AUDIO_METER_MODULE_KT = [
   ``,
   `        interpreter?.close()`,
   `        interpreter = null`,
+  `    }`,
+  ``,
+  `    private fun loadLabels(): List<String> {`,
+  `        return try {`,
+  `            reactApplicationContext.assets.open("labels.txt").bufferedReader().useLines { lines ->`,
+  `                lines.map { it.trim() }.filter { it.isNotEmpty() }.toList()`,
+  `            }`,
+  `        } catch (e: Exception) {`,
+  `            Log.w(TAG, "Failed to load labels.txt", e)`,
+  `            emptyList()`,
+  `        }`,
   `    }`,
   ``,
   `    private fun startAudioProcessing() {`,
@@ -189,27 +217,45 @@ const AUDIO_METER_MODULE_KT = [
   `        }`,
   `        inputBuf.rewind()`,
   ``,
-  `        val outputBuf = ByteBuffer.allocateDirect(2).order(ByteOrder.nativeOrder())`,
+  `        // Infer the number of output classes from the model itself rather than hard-coding 2.`,
+  `        val outputShape = interpreter?.getOutputTensor(0)?.shape() ?: intArrayOf(labels.size)`,
+  `        val classCount = outputShape.last().coerceAtLeast(1)`,
+  `        val outputBuf = ByteBuffer.allocateDirect(classCount).order(ByteOrder.nativeOrder())`,
   `        interpreter?.run(inputBuf, outputBuf)`,
   `        outputBuf.rewind()`,
   ``,
-  `        val q0 = outputBuf.get().toInt()`,
-  `        val q1 = outputBuf.get().toInt()`,
-  `        val logit0 = (q0 - OUTPUT_ZERO_POINT) * OUTPUT_SCALE`,
-  `        val logit1 = (q1 - OUTPUT_ZERO_POINT) * OUTPUT_SCALE`,
-  `        val probs = softmax(doubleArrayOf(logit0, logit1))`,
+  `        val logits = DoubleArray(classCount) { _ ->`,
+  `            val q = outputBuf.get().toInt()`,
+  `            (q - OUTPUT_ZERO_POINT) * OUTPUT_SCALE`,
+  `        }`,
+  `        val probs = softmax(logits)`,
   ``,
-  `        val noiseConfidence = probs[0]`,
-  `        val snoreConfidence = probs[1]`,
-  `        val isSnoring = snoreConfidence > noiseConfidence && snoreConfidence > 0.5`,
+  `        // Build a name -> confidence map aligned with labels.txt. If the model has more classes`,
+  `        // than labels, fall back to generic names so the JS side never receives an empty map.`,
+  `        val confidences = mutableMapOf<String, Double>()`,
+  `        for (i in probs.indices) {`,
+  `            val name = labels.getOrElse(i) { "class_\$i" }`,
+  `            confidences[name] = probs[i]`,
+  `        }`,
+  ``,
+  `        val topIdx = probs.indices.maxByOrNull { probs[it] } ?: 0`,
+  `        val topClass = labels.getOrElse(topIdx) { "class_\$topIdx" }`,
+  `        val topConfidence = probs[topIdx]`,
+  `        val snoringIndex = labels.indexOf("snoring")`,
+  `        val isSnoring = if (snoringIndex >= 0) {`,
+  `            probs[snoringIndex] > 0.5 && probs[snoringIndex] >= topConfidence`,
+  `        } else {`,
+  `            topClass == "snoring"`,
+  `        }`,
   ``,
   `        synchronized(lock) {`,
-  `            latestSnoreConfidence = snoreConfidence`,
-  `            latestNoiseConfidence = noiseConfidence`,
+  `            latestConfidences = confidences`,
+  `            latestTopClass = topClass`,
+  `            latestTopConfidence = topConfidence`,
   `            latestIsSnoring = isSnoring`,
   `            latestAmplitudeDb = amplitudeDb`,
   `        }`,
-  `        Log.d(TAG, "Inference snore=%.3f noise=%.3f isSnoring=%s amp=%.1fdB".format(snoreConfidence, noiseConfidence, isSnoring, amplitudeDb))`,
+  `        Log.d(TAG, "Inference top=%s %.3f snoring=%.3f amp=%.1fdB".format(topClass, topConfidence, confidences["snoring"] ?: 0.0, amplitudeDb))`,
   `    }`,
   ``,
   `    private fun computeSpectrogramFeatures(audioWindow: DoubleArray): DoubleArray {`,
@@ -344,15 +390,15 @@ const AUDIO_METER_MODULE_KT = [
   `    }`,
   ``,
   `    private fun writeIntLe(out: DataOutputStream, v: Int) {`,
-  `        out.write(v and 0xFF)`,
-  `        out.write((v shr 8) and 0xFF)`,
-  `        out.write((v shr 16) and 0xFF)`,
-  `        out.write((v shr 24) and 0xFF)`,
+  `        write(v and 0xFF)`,
+  `        write((v shr 8) and 0xFF)`,
+  `        write((v shr 16) and 0xFF)`,
+  `        write((v shr 24) and 0xFF)`,
   `    }`,
   ``,
   `    private fun writeShortLe(out: DataOutputStream, v: Int) {`,
-  `        out.write(v and 0xFF)`,
-  `        out.write((v shr 8) and 0xFF)`,
+  `        write(v and 0xFF)`,
+  `        write((v shr 8) and 0xFF)`,
   `    }`,
   `}`,
   ``,
@@ -379,7 +425,7 @@ const AUDIO_METER_PACKAGE_KT = [
 ].join('\n');
 
 function withAudioMeter(config) {
-  // 1. Write native module files and copy the TFLite model into Android assets
+  // 1. Write native module files and copy the TFLite model + labels into Android assets
   config = withDangerousMod(config, [
     'android',
     async (config) => {
@@ -390,15 +436,25 @@ function withAudioMeter(config) {
       fs.writeFileSync(path.join(javaDir, 'AudioMeterModule.kt'), AUDIO_METER_MODULE_KT);
       fs.writeFileSync(path.join(javaDir, 'AudioMeterPackage.kt'), AUDIO_METER_PACKAGE_KT);
 
-      // Copy the quantized snore detection model into Android assets
+      // Copy the quantized snore detection model and label file into Android assets.
+      // labels.txt makes the native module generic: class names are no longer hard-coded.
       const assetsDir = path.join(root, 'app/src/main/assets');
       fs.mkdirSync(assetsDir, { recursive: true });
+
       const modelSrc = path.join(projectRoot, 'assets/snore_detection.tflite');
       const modelDst = path.join(assetsDir, 'snore_detection.tflite');
       if (fs.existsSync(modelSrc)) {
         fs.copyFileSync(modelSrc, modelDst);
       } else {
         throw new Error(`TFLite model not found at ${modelSrc}`);
+      }
+
+      const labelsSrc = path.join(projectRoot, 'assets/labels.txt');
+      const labelsDst = path.join(assetsDir, 'labels.txt');
+      if (fs.existsSync(labelsSrc)) {
+        fs.copyFileSync(labelsSrc, labelsDst);
+      } else {
+        throw new Error(`labels.txt not found at ${labelsSrc}`);
       }
 
       return config;
