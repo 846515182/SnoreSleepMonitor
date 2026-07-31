@@ -13,6 +13,7 @@ import {
   Platform,
   PermissionsAndroid,
   ActivityIndicator,
+  Linking,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
@@ -47,6 +48,10 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
+const CURRENT_VERSION = '1.0.2';
+const GITHUB_OWNER = '846515182';
+const GITHUB_REPO = 'SnoreSleepMonitor';
+const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
 const STORAGE_KEY = '@snore_sessions_v2';
 const SETTINGS_KEY = '@snore_settings_v2';
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
@@ -76,6 +81,52 @@ function formatTime(ts: number): string {
 function formatClock(ts: number): string {
   const d = new Date(ts);
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+}
+
+function parseVersion(version: string): number[] {
+  return version
+    .replace(/^v/i, '')
+    .split('.')
+    .map((n) => parseInt(n, 10) || 0);
+}
+
+function compareVersion(local: string, remote: string): number {
+  const a = parseVersion(local);
+  const b = parseVersion(remote);
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const av = a[i] || 0;
+    const bv = b[i] || 0;
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+  }
+  return 0;
+}
+
+interface LatestRelease {
+  version: string;
+  downloadUrl: string;
+  body: string;
+}
+
+async function fetchLatestRelease(): Promise<LatestRelease | null> {
+  try {
+    const res = await fetch(GITHUB_RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json' },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const apkAsset = (data.assets || []).find((a: any) => a.name?.endsWith('.apk'));
+    if (!apkAsset?.browser_download_url) return null;
+    return {
+      version: data.tag_name || '',
+      downloadUrl: apkAsset.browser_download_url,
+      body: data.body || '',
+    };
+  } catch (e) {
+    console.warn('检查更新失败', e);
+    return null;
+  }
 }
 
 function calculateQualityScore(sleepSeconds: number, noiseSeconds: number): number {
@@ -112,6 +163,8 @@ export default function App() {
   const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
   const [playbackDurMs, setPlaybackDurMs] = useState(0); // 录音总时长（毫秒）
   const [isReady, setIsReady] = useState(false);
+  const [latestRelease, setLatestRelease] = useState<LatestRelease | null>(null);
+  const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'available' | 'latest' | 'error'>('idle');
 
   const recordingRef = useRef<Audio.Recording | null>(null);
   const recordingUriRef = useRef<string>('');
@@ -149,10 +202,51 @@ export default function App() {
       if (mounted) {
         setHasPermission(permitted);
         setIsReady(true);
+        checkUpdate(false);
       }
     })();
     return () => { mounted = false; };
   }, []);
+
+  const checkUpdate = async (interactive = false) => {
+    if (interactive) setUpdateCheckState('checking');
+    const release = await fetchLatestRelease();
+    if (!release) {
+      if (interactive) setUpdateCheckState('error');
+      return;
+    }
+    setLatestRelease(release);
+    const cmp = compareVersion(CURRENT_VERSION, release.version);
+    if (cmp < 0) {
+      setUpdateCheckState('available');
+      Alert.alert(
+        '发现新版本',
+        `当前版本：${CURRENT_VERSION}\n最新版本：${release.version}\n\n是否立即下载更新？`,
+        [
+          { text: '稍后再说', style: 'cancel' },
+          { text: '立即更新', onPress: () => openUpdateUrl(release.downloadUrl) },
+        ]
+      );
+    } else {
+      setUpdateCheckState('latest');
+      if (interactive) {
+        Alert.alert('已是最新版本', `当前版本 ${CURRENT_VERSION} 已是最新。`);
+      }
+    }
+  };
+
+  const openUpdateUrl = async (url: string) => {
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+      } else {
+        Alert.alert('无法打开下载链接', url);
+      }
+    } catch (e) {
+      Alert.alert('打开链接失败', String(e));
+    }
+  };
 
   const loadSessions = async () => {
     try {
@@ -971,6 +1065,27 @@ export default function App() {
             setGrindThreshold(DEFAULT_GRIND_CONFIDENCE);
             saveSettings(DEFAULT_SNORE_CONFIDENCE, DEFAULT_GRIND_CONFIDENCE);
           }}
+        />
+
+        <View style={{ height: 1, backgroundColor: '#E8EDF2', marginVertical: 20 }} />
+
+        <Text style={styles.sectionTitle}>应用更新</Text>
+        <Text style={styles.settingsDesc}>
+          当前版本：{CURRENT_VERSION}
+          {latestRelease && updateCheckState === 'available' && ` → 最新版本：${latestRelease.version}`}
+        </Text>
+        {updateCheckState === 'available' && latestRelease && (
+          <TouchableOpacity
+            style={[styles.mainButton, styles.startButton, { marginBottom: 12 }]}
+            onPress={() => openUpdateUrl(latestRelease.downloadUrl)}
+          >
+            <Text style={styles.mainButtonText}>下载最新版本 APK</Text>
+          </TouchableOpacity>
+        )}
+        <Button
+          title={updateCheckState === 'checking' ? '检查中…' : '检查更新'}
+          onPress={() => checkUpdate(true)}
+          disabled={updateCheckState === 'checking'}
         />
       </View>
     </ScrollView>
