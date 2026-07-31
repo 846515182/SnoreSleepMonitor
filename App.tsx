@@ -61,7 +61,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.5';
+const CURRENT_VERSION = '1.1.6';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -340,62 +340,6 @@ export default function App() {
     setDownloadStatus('已取消下载');
   };
 
-  const checkInstallPermission = async (): Promise<boolean> => {
-    if (Platform.OS !== 'android') return true;
-    if (!Platform.Version || Number(Platform.Version) < 26) return true;
-    const perm = PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES;
-    if (!perm) {
-      // 某些设备/ROM 不支持此权限常量，直接引导用户去设置页手动开启
-      return false;
-    }
-    try {
-      return await PermissionsAndroid.check(perm);
-    } catch (e) {
-      console.warn('检查安装权限失败', e);
-      return false;
-    }
-  };
-
-  const requestInstallPermission = async (): Promise<boolean> => {
-    if (Platform.OS !== 'android') return true;
-    if (!Platform.Version || Number(Platform.Version) < 26) return true;
-    const perm = PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES;
-    if (!perm) {
-      // 权限常量不存在，直接引导用户去系统设置开启"安装未知应用"
-      Alert.alert(
-        '需要手动开启权限',
-        '请前往系统设置 → 应用 → 睡眠监测 → 安装未知应用，允许后返回重试。',
-        [
-          { text: '取消', style: 'cancel' },
-          { text: '去设置', onPress: () => Linking.openSettings() },
-        ]
-      );
-      return false;
-    }
-    try {
-      const result = await PermissionsAndroid.request(perm, {
-        title: '需要安装权限',
-        message: '应用更新需要允许安装未知来源应用，请在系统设置中开启。',
-        buttonNeutral: '稍后询问',
-        buttonNegative: '取消',
-        buttonPositive: '去设置',
-      });
-      if (result === PermissionsAndroid.RESULTS.GRANTED) return true;
-      Alert.alert(
-        '需要手动开启权限',
-        '请前往系统设置 → 应用 → 睡眠监测 → 安装未知应用，允许后返回重试。',
-        [
-          { text: '取消', style: 'cancel' },
-          { text: '去设置', onPress: () => Linking.openSettings() },
-        ]
-      );
-      return false;
-    } catch (e) {
-      console.warn('申请安装权限失败', e);
-      return false;
-    }
-  };
-
   // 清理旧 APK 缓存，保留最近 MAX_CACHED_APKS 个，避免占用空间并确保覆盖安装干净。
   const cleanUpdateCache = async (keepFileName?: string) => {
     try {
@@ -476,13 +420,6 @@ export default function App() {
       return;
     }
 
-    // 检查安装权限（Android 8+ 需要 REQUEST_INSTALL_PACKAGES）
-    const canInstall = await checkInstallPermission();
-    if (!canInstall) {
-      const granted = await requestInstallPermission();
-      if (!granted) return;
-    }
-
     // 覆盖安装前提示用户：新版会替换旧版并清理应用缓存。
     if (interactive) {
       const confirmed = await new Promise<boolean>((resolve) => {
@@ -514,7 +451,10 @@ export default function App() {
       // Android 6.0-9.0 如要写入外部存储才需申请，缓存目录不需要
       if (Platform.Version && Number(Platform.Version) < 29) {
         try {
-          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+          const storagePerm = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
+          if (storagePerm) {
+            await PermissionsAndroid.request(storagePerm);
+          }
         } catch {
           // 忽略，缓存目录不需要此权限
         }
@@ -578,9 +518,25 @@ export default function App() {
       if (interactive) {
         Alert.alert(
           '更新失败',
-          `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n3. 存储空间不足\n\n是否改用浏览器下载？`,
+          `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n3. 存储空间不足\n\n建议先开启安装未知应用权限后再试。`,
           [
             { text: '取消', style: 'cancel' },
+            {
+              text: '去开启',
+              onPress: async () => {
+                try {
+                  if (Platform.Version && Number(Platform.Version) >= 26) {
+                    await IntentLauncher.startActivityAsync('android.settings.MANAGE_UNKNOWN_APP_SOURCES', {
+                      data: 'package:com.snoresleep.monitor',
+                    });
+                  } else {
+                    Linking.openSettings();
+                  }
+                } catch {
+                  Linking.openSettings();
+                }
+              },
+            },
             { text: '浏览器下载', onPress: () => openUpdateUrl(url) },
           ]
         );
@@ -650,7 +606,8 @@ export default function App() {
         return status === 'granted';
       }
     } catch (e) {
-      console.error('权限检查失败', e);
+      console.error('权限请求失败', e);
+      Alert.alert('权限请求失败', '请在系统设置中手动允许麦克风权限。');
       return false;
     }
   };
