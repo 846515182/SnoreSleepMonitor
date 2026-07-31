@@ -726,7 +726,7 @@ export default function App() {
   const renderHistory = () => (
     <View style={styles.flex}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => setScreen('home')}>
+        <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           <Text style={styles.backText}>← 返回</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>历史记录</Text>
@@ -773,7 +773,7 @@ export default function App() {
     return (
       <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => setScreen('history')}>
+          <TouchableOpacity onPress={() => setScreen('history')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
             <Text style={styles.backText}>← 返回</Text>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>记录详情</Text>
@@ -893,7 +893,7 @@ export default function App() {
   const renderSettings = () => (
     <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => setScreen('home')}>
+        <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           <Text style={styles.backText}>← 返回</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>灵敏度设置</Text>
@@ -1160,13 +1160,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingTop: 16,
+    paddingBottom: 14,
     backgroundColor: '#fff',
   },
   backText: {
     fontSize: 16,
     color: '#4ECDC4',
-    paddingHorizontal: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 8,
     minWidth: 50,
   },
   headerTitle: {
