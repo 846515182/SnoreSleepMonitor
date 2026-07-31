@@ -164,9 +164,13 @@ interface LatestRelease {
 
 async function fetchLatestRelease(): Promise<LatestRelease | null> {
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(GITHUB_RELEASE_API, {
       headers: { Accept: 'application/vnd.github+json' },
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     if (!res.ok) return null;
     const data = await res.json();
     const apkAsset = (data.assets || []).find((a: any) => a.name?.endsWith('.apk'));
@@ -1271,7 +1275,7 @@ export default function App() {
           <View style={styles.volumeHeader}>
             <Text style={styles.volumeLabel}>实时音量</Text>
             <View style={[styles.badge, { backgroundColor: `${THEME.snore}15` }]}>
-              <Text style={[styles.badgeText, { color: THEME.snore }]}>阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
+              <Text style={[styles.badgeText, { color: THEME.snore }]}>鼾声阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
             </View>
           </View>
           <View style={styles.volumeBarBg}>
@@ -1525,6 +1529,21 @@ export default function App() {
               <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalSnoreSeconds)}</Text>
               <Text style={styles.detailStatLabel}>鼾声时长</Text>
             </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="git-branch-outline" size={20} color={THEME.grind} />
+              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalGrindSeconds)}</Text>
+              <Text style={styles.detailStatLabel}>磨牙时长</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="chatbubble-outline" size={20} color={THEME.talk} />
+              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalTalkSeconds)}</Text>
+              <Text style={styles.detailStatLabel}>梦话时长</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="pulse-outline" size={20} color={THEME.apnea} />
+              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalApneaSeconds)}</Text>
+              <Text style={styles.detailStatLabel}>呼吸暂停时长</Text>
+            </View>
           </View>
 
           <View style={[styles.qualityBadgeLarge, { backgroundColor: getQualityColor(selectedSession.qualityScore), marginBottom: 10 }]}>
@@ -1541,16 +1560,16 @@ export default function App() {
                 <Ionicons name="stats-chart-outline" size={16} color={THEME.text} /> 鼾声强度分布
               </Text>
               <View style={styles.intensityRow}>
-                <View style={[styles.intensityBlock, { backgroundColor: '#2ECC7120' }]}>
-                  <Text style={[styles.detailStatValue, { color: '#2ECC71' }]}>{selectedSession.intensityBreakdown.mild}</Text>
+                <View style={[styles.intensityBlock, { backgroundColor: `${THEME.success}20` }]}>
+                  <Text style={[styles.detailStatValue, { color: THEME.success }]}>{selectedSession.intensityBreakdown.mild}</Text>
                   <Text style={styles.detailStatLabel}>轻度</Text>
                 </View>
-                <View style={[styles.intensityBlock, { backgroundColor: '#F1C40F20' }]}>
-                  <Text style={[styles.detailStatValue, { color: '#F1C40F' }]}>{selectedSession.intensityBreakdown.moderate}</Text>
+                <View style={[styles.intensityBlock, { backgroundColor: `${THEME.warning}20` }]}>
+                  <Text style={[styles.detailStatValue, { color: THEME.warning }]}>{selectedSession.intensityBreakdown.moderate}</Text>
                   <Text style={styles.detailStatLabel}>中度</Text>
                 </View>
-                <View style={[styles.intensityBlock, { backgroundColor: '#E74C3C20' }]}>
-                  <Text style={[styles.detailStatValue, { color: '#E74C3C' }]}>{selectedSession.intensityBreakdown.severe}</Text>
+                <View style={[styles.intensityBlock, { backgroundColor: `${THEME.danger}20` }]}>
+                  <Text style={[styles.detailStatValue, { color: THEME.danger }]}>{selectedSession.intensityBreakdown.severe}</Text>
                   <Text style={styles.detailStatLabel}>重度</Text>
                 </View>
               </View>
