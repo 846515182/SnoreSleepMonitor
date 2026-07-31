@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
-  Button,
+  AppState,
   FlatList,
   NativeModules,
   SafeAreaView,
@@ -16,12 +16,15 @@ import {
   Linking,
   StatusBar as RNStatusBar,
   Modal,
+  Dimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { Ionicons } from '@expo/vector-icons';
 
 // 原生音频模块（Android 专用，用 MediaRecorder.getMaxAmplitude 获取实时音量）
 const AudioMeter = NativeModules.AudioMeter;
@@ -58,7 +61,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.1';
+const CURRENT_VERSION = '1.1.2';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -77,6 +80,31 @@ const MIN_TALK_MS = 500; // 最小梦话持续时间 0.5 秒
 const MIN_APNEA_MS = 200; // 最小呼吸暂停事件 0.2 秒
 const MAX_APNEA_MS = 2000; // 呼吸暂停事件一般不超过 2 秒
 const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
+const MAX_RECORDING_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 保留 7 天录音
+const MAX_CACHED_APKS = 3; // 最多保留几个更新包
+
+// 主题色与设计 token
+const THEME = {
+  primary: '#4ECDC4',
+  primaryDark: '#3DBDB5',
+  danger: '#FF6B6B',
+  dangerDark: '#E85C5C',
+  warning: '#FFD93D',
+  success: '#2ECC71',
+  text: '#1A2B3C',
+  textSecondary: '#7A8B9C',
+  textTertiary: '#A0AEBB',
+  background: '#F5F7FA',
+  card: '#FFFFFF',
+  border: '#E8EDF2',
+  snore: '#4ECDC4',
+  grind: '#FFD93D',
+  talk: '#9B59B6',
+  apnea: '#FF6B6B',
+  noise: '#7A8B9C',
+} as const;
+
+const { width: SCREEN_W } = Dimensions.get('window');
 
 // 辅助函数
 function formatDuration(totalSeconds: number): string {
@@ -94,6 +122,17 @@ function formatTime(ts: number): string {
 function formatClock(ts: number): string {
   const d = new Date(ts);
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
+}
+
+function formatBytes(bytes?: number): string {
+  if (bytes == null || bytes <= 0) return '';
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+}
+
+function cachePath(name: string): string {
+  const dir = FileSystem.cacheDirectory || '';
+  return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
 }
 
 function parseVersion(version: string): number[] {
@@ -120,6 +159,7 @@ interface LatestRelease {
   version: string;
   downloadUrl: string;
   body: string;
+  size?: number;
 }
 
 async function fetchLatestRelease(): Promise<LatestRelease | null> {
@@ -135,6 +175,7 @@ async function fetchLatestRelease(): Promise<LatestRelease | null> {
       version: data.tag_name || '',
       downloadUrl: apkAsset.browser_download_url,
       body: data.body || '',
+      size: typeof apkAsset.size === 'number' ? apkAsset.size : undefined,
     };
   } catch (e) {
     console.warn('检查更新失败', e);
@@ -171,6 +212,7 @@ export default function App() {
   const [confidences, setConfidences] = useState<Record<string, number>>({});
   const [isSnoringNow, setIsSnoringNow] = useState(false);
   const [snoreIntensity, setSnoreIntensity] = useState<'mild' | 'moderate' | 'severe' | null>(null);
+  const [isFallbackMode, setIsFallbackMode] = useState(false); // true = 使用 expo-av 降级，无 AI 模型
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [snoreCount, setSnoreCount] = useState(0);
@@ -226,6 +268,7 @@ export default function App() {
         console.warn('加载设置失败', e);
       }
       await loadSessions();
+      await cleanOldRecordings();
       const permitted = await checkPermission();
       if (mounted) {
         setHasPermission(permitted);
@@ -235,6 +278,17 @@ export default function App() {
     })();
     return () => { mounted = false; };
   }, []);
+
+  const promptUpdate = (release: LatestRelease) => {
+    Alert.alert(
+      '发现新版本',
+      `当前版本：${CURRENT_VERSION}\n最新版本：${release.version}\n\n是否立即下载更新？`,
+      [
+        { text: '稍后再说', style: 'cancel' },
+        { text: '立即更新', onPress: () => downloadAndInstallApk(release.downloadUrl) },
+      ]
+    );
+  };
 
   const checkUpdate = async (interactive = false) => {
     if (interactive) setUpdateCheckState('checking');
@@ -247,14 +301,10 @@ export default function App() {
     const cmp = compareVersion(CURRENT_VERSION, release.version);
     if (cmp < 0) {
       setUpdateCheckState('available');
-      Alert.alert(
-        '发现新版本',
-        `当前版本：${CURRENT_VERSION}\n最新版本：${release.version}\n\n是否立即下载更新？`,
-        [
-          { text: '稍后再说', style: 'cancel' },
-          { text: '立即更新', onPress: () => downloadAndInstallApk(release.downloadUrl) },
-        ]
-      );
+      // 仅在用户主动点击“检查更新”时弹窗；启动时自动检查只显示角标，避免打扰。
+      if (interactive && release) {
+        promptUpdate(release);
+      }
     } else {
       setUpdateCheckState('latest');
       if (interactive) {
@@ -290,15 +340,151 @@ export default function App() {
     setDownloadStatus('已取消下载');
   };
 
-  const downloadAndInstallApk = async (url: string) => {
+  const checkInstallPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    if (!Platform.Version || Number(Platform.Version) < 26) return true;
+    try {
+      const granted = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES!
+      );
+      return granted;
+    } catch (e) {
+      console.warn('检查安装权限失败', e);
+      return false;
+    }
+  };
+
+  const requestInstallPermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+    if (!Platform.Version || Number(Platform.Version) < 26) return true;
+    try {
+      const result = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.REQUEST_INSTALL_PACKAGES!,
+        {
+          title: '需要安装权限',
+          message: '应用更新需要允许安装未知来源应用，请在系统设置中开启。',
+          buttonNeutral: '稍后询问',
+          buttonNegative: '取消',
+          buttonPositive: '去设置',
+        }
+      );
+      if (result === PermissionsAndroid.RESULTS.GRANTED) return true;
+      // 引导用户到设置页手动开启
+      Alert.alert(
+        '需要手动开启权限',
+        '请前往系统设置 → 应用 → 睡眠监测 → 安装未知应用，允许后返回重试。',
+        [
+          { text: '取消', style: 'cancel' },
+          { text: '去设置', onPress: () => Linking.openSettings() },
+        ]
+      );
+      return false;
+    } catch (e) {
+      console.warn('申请安装权限失败', e);
+      return false;
+    }
+  };
+
+  // 清理旧 APK 缓存，保留最近 MAX_CACHED_APKS 个，避免占用空间并确保覆盖安装干净。
+  const cleanUpdateCache = async (keepFileName?: string) => {
+    try {
+      if (!FileSystem.cacheDirectory) return;
+      const entries = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
+      const oldApks = entries
+        .filter((name) => name.startsWith('update_') && name.endsWith('.apk'))
+        .sort()
+        .reverse();
+      const toDelete = oldApks.filter((name) => name !== keepFileName).slice(MAX_CACHED_APKS);
+      await Promise.all(
+        toDelete.map((name) => FileSystem.deleteAsync(cachePath(name), { idempotent: true }).catch(() => {}))
+      );
+    } catch (e) {
+      console.warn('清理更新缓存失败', e);
+    }
+  };
+
+  // 清理应用自身缓存目录（不包括要安装的 APK），用于更新前释放空间、避免旧数据干扰。
+  const cleanAppCache = async (excludeApkName?: string) => {
+    try {
+      if (!FileSystem.cacheDirectory) return;
+      const entries = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
+      await Promise.all(
+        entries.map(async (name) => {
+          if (name === excludeApkName) return;
+          if (name.startsWith('update_') && name.endsWith('.apk')) return; // 由 cleanUpdateCache 管理
+          const itemUri = cachePath(name);
+          try {
+            const info = await FileSystem.getInfoAsync(itemUri);
+            if (info.exists && info.isDirectory) return; // 不删除目录，避免误删关键数据
+            await FileSystem.deleteAsync(itemUri, { idempotent: true });
+          } catch {
+            // 忽略无法删除的项
+          }
+        })
+      );
+    } catch (e) {
+      console.warn('清理应用缓存失败', e);
+    }
+  };
+
+  // 清理超过保留期的录音文件，防止缓存无限增长。
+  const cleanOldRecordings = async () => {
+    try {
+      const recordingsDir = cachePath('recordings');
+      const info = await FileSystem.getInfoAsync(recordingsDir);
+      if (!info.exists || !info.isDirectory) return;
+      const entries = await FileSystem.readDirectoryAsync(recordingsDir);
+      const now = Date.now();
+      await Promise.all(
+        entries.map(async (name) => {
+          if (!name.endsWith('.wav')) return;
+          try {
+            const fileUri = recordingsDir.endsWith('/') ? `${recordingsDir}${name}` : `${recordingsDir}/${name}`;
+            const fileInfo = await FileSystem.getInfoAsync(fileUri);
+            if (fileInfo.exists && fileInfo.modificationTime && now - fileInfo.modificationTime > MAX_RECORDING_AGE_MS) {
+              await FileSystem.deleteAsync(fileInfo.uri, { idempotent: true });
+            }
+          } catch {
+            // ignore
+          }
+        })
+      );
+    } catch (e) {
+      console.warn('清理旧录音失败', e);
+    }
+  };
+
+  const downloadAndInstallApk = async (url: string, interactive = true) => {
     if (Platform.OS !== 'android') {
       openUpdateUrl(url);
       return;
     }
 
     if (isDownloading) {
-      Alert.alert('下载中', '已有更新任务在下载，请等待完成。');
+      if (interactive) Alert.alert('下载中', '已有更新任务在下载，请等待完成。');
       return;
+    }
+
+    // 检查安装权限（Android 8+ 需要 REQUEST_INSTALL_PACKAGES）
+    const canInstall = await checkInstallPermission();
+    if (!canInstall) {
+      const granted = await requestInstallPermission();
+      if (!granted) return;
+    }
+
+    // 覆盖安装前提示用户：新版会替换旧版并清理应用缓存。
+    if (interactive) {
+      const confirmed = await new Promise<boolean>((resolve) => {
+        Alert.alert(
+          '覆盖安装确认',
+          '下载完成后将使用新版 APK 覆盖安装旧版，并清理应用缓存（不会影响历史记录）。是否继续？',
+          [
+            { text: '取消', style: 'cancel', onPress: () => resolve(false) },
+            { text: '继续', onPress: () => resolve(true) },
+          ]
+        );
+      });
+      if (!confirmed) return;
     }
 
     setIsDownloading(true);
@@ -306,29 +492,36 @@ export default function App() {
     setDownloadStatus('准备下载…');
 
     try {
-      // 请求存储权限（Android 6.0-9.0 下载到缓存外需要，这里先顺手申请）
+      const fileName = `update_${Date.now()}.apk`;
+      const fileUri = cachePath(fileName);
+      const expectedSize = latestRelease?.size;
+
+      // 下载前清理旧的更新包和过期录音，减少存储占用。
+      await cleanUpdateCache(fileName);
+      await cleanOldRecordings();
+
+      // Android 6.0-9.0 如要写入外部存储才需申请，缓存目录不需要
       if (Platform.Version && Number(Platform.Version) < 29) {
         try {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
         } catch {
-          // 忽略权限申请失败，缓存目录不需要此权限
+          // 忽略，缓存目录不需要此权限
         }
       }
 
-      const fileName = `update_${Date.now()}.apk`;
-      const fileUri = FileSystem.cacheDirectory + fileName;
-
-      setDownloadStatus('正在下载…');
+      setDownloadStatus(expectedSize ? `正在下载… 0% / ${formatBytes(expectedSize)}` : '正在下载…');
       downloadResumableRef.current = FileSystem.createDownloadResumable(
         url,
         fileUri,
         {},
         (progress) => {
-          const total = progress.totalBytesExpectedToWrite || 1;
+          const total = progress.totalBytesExpectedToWrite || expectedSize || 1;
           const written = progress.totalBytesWritten || 0;
           const pct = Math.min(1, Math.max(0, written / total));
           setDownloadProgress(pct);
-          setDownloadStatus(`正在下载… ${Math.round(pct * 100)}%`);
+          setDownloadStatus(
+            `正在下载… ${Math.round(pct * 100)}%${expectedSize ? ` / ${formatBytes(expectedSize)}` : ''}`
+          );
         }
       );
 
@@ -338,8 +531,24 @@ export default function App() {
         throw new Error('下载失败，请检查网络');
       }
 
-      setDownloadStatus('下载完成，准备安装…');
+      // 校验：APK 文件至少大于 1MB，且大小与 GitHub 声明一致（允许 ±1% 误差）
+      const fileInfo = await FileSystem.getInfoAsync(result.uri);
+      if (!fileInfo.exists || fileInfo.size < 1024 * 1024) {
+        throw new Error('下载文件异常，请重试');
+      }
+      if (expectedSize && expectedSize > 0 && fileInfo.size) {
+        const ratio = fileInfo.size / expectedSize;
+        if (ratio < 0.99 || ratio > 1.01) {
+          throw new Error(`文件大小校验失败，请重试（${formatBytes(fileInfo.size)} / ${formatBytes(expectedSize)}）`);
+        }
+      }
+
+      setDownloadStatus('下载完成，清理缓存并准备安装…');
       setDownloadProgress(1);
+
+      // 安装前清理应用自身缓存（保留刚下载的 APK），释放空间并减少旧数据干扰。
+      await cleanAppCache(fileName);
+      await cleanUpdateCache(fileName);
 
       // 获取 content:// URI 并启动安装界面
       const contentUri = await FileSystem.getContentUriAsync(result.uri);
@@ -355,14 +564,16 @@ export default function App() {
       setIsDownloading(false);
       setDownloadProgress(0);
       console.warn('下载或安装失败', e);
-      Alert.alert(
-        '更新失败',
-        `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n\n是否改用浏览器下载？`,
-        [
-          { text: '取消', style: 'cancel' },
-          { text: '浏览器下载', onPress: () => openUpdateUrl(url) },
-        ]
-      );
+      if (interactive) {
+        Alert.alert(
+          '更新失败',
+          `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n3. 存储空间不足\n\n是否改用浏览器下载？`,
+          [
+            { text: '取消', style: 'cancel' },
+            { text: '浏览器下载', onPress: () => openUpdateUrl(url) },
+          ]
+        );
+      }
     }
   };
 
@@ -374,10 +585,12 @@ export default function App() {
         // 兼容旧数据：新版本字段不存在时补默认值
         const normalized = parsed.map((s) => ({
           ...s,
+          durationSeconds: s.durationSeconds || 1,
           talkCount: s.talkCount ?? 0,
           apneaCount: s.apneaCount ?? 0,
           totalTalkSeconds: s.totalTalkSeconds ?? 0,
           totalApneaSeconds: s.totalApneaSeconds ?? 0,
+          qualityScore: s.qualityScore ?? 100,
           apneaRisk: s.apneaRisk ?? 'low',
           intensityBreakdown: s.intensityBreakdown ?? { mild: 0, moderate: 0, severe: 0 },
           events: (s.events || []).map((e) => ({
@@ -459,6 +672,7 @@ export default function App() {
 
     try {
       await setupAudioMode();
+      await activateKeepAwakeAsync('monitor');
 
       // 优先使用原生 AudioMeter 模块（Android），失败时自动降级到 expo-av
       let nativeStarted = false;
@@ -469,13 +683,22 @@ export default function App() {
           recordingUriRef.current = recordingUri;
           useNativeMeterRef.current = true;
           nativeStarted = true;
+          setIsFallbackMode(false);
         } catch (nativeErr) {
           console.warn('原生 AudioMeter 启动失败，降级到 expo-av', nativeErr);
           useNativeMeterRef.current = false;
+          setIsFallbackMode(true);
+          // 原生模块可能已部分初始化资源，尝试释放避免泄漏。
+          try {
+            await AudioMeter.stopRecording();
+          } catch {
+            // ignore
+          }
         }
       }
       if (!nativeStarted) {
         useNativeMeterRef.current = false;
+        setIsFallbackMode(true);
         lastMeteringRef.current = -100;
         // expo-av 回退方案：用 onRecordingStatusUpdate 回调获取 metering（比 getStatusAsync 更可靠）
         const recordingOptions: Audio.RecordingOptions = {
@@ -559,6 +782,8 @@ export default function App() {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
       setIsMonitoring(false);
+      setIsFallbackMode(false);
+      deactivateKeepAwake('monitor').catch(() => {});
     } finally {
       setIsBusy(false);
     }
@@ -843,6 +1068,7 @@ export default function App() {
     recordingUriRef.current = '';
     setIsMonitoring(false);
     setIsBusy(false);
+    setIsFallbackMode(false);
     setVolumeDb(-100);
     setSnoreConfidence(0);
     setGrindConfidence(0);
@@ -853,6 +1079,7 @@ export default function App() {
     setConfidences({});
     setSnoreIntensity(null);
     setIsSnoringNow(false);
+    deactivateKeepAwake('monitor').catch(() => {});
   };
 
   const deleteSession = async (id: string) => {
@@ -923,6 +1150,18 @@ export default function App() {
     }
   };
 
+  // 应用切到后台时自动保存并停止监测，避免进程被杀导致数据丢失。
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'background' || nextAppState === 'inactive') {
+        if (isMonitoring) {
+          stopMonitoring().catch((e) => console.warn('后台停止监测失败', e));
+        }
+      }
+    });
+    return () => subscription.remove();
+  }, [isMonitoring, sessions]);
+
   useEffect(() => {
     return () => {
       if (monitorTimerRef.current) clearTimeout(monitorTimerRef.current);
@@ -935,6 +1174,7 @@ export default function App() {
       if (soundRef.current) {
         soundRef.current.unloadAsync().catch(() => {});
       }
+      deactivateKeepAwake('monitor').catch(() => {});
     };
   }, []);
 
@@ -950,45 +1190,85 @@ export default function App() {
   // UI 渲染
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.homeContent}>
-      <View style={styles.card}>
-        <Text style={styles.title}>睡眠监测</Text>
-        <Text style={styles.subtitle}>记录打鼾、磨牙、梦话、呼吸暂停与整晚录音</Text>
+      <View style={styles.heroCard}>
+        <View style={styles.heroHeader}>
+          <View style={styles.appIconCircle}>
+            <Ionicons name="moon-outline" size={28} color="#fff" />
+          </View>
+          <View style={styles.heroTitleBlock}>
+            <Text style={styles.title}>睡眠监测</Text>
+            <Text style={styles.subtitle}>v{CURRENT_VERSION} · 守护整晚安睡</Text>
+          </View>
+          {updateCheckState === 'available' && latestRelease && (
+            <TouchableOpacity
+              style={styles.updateBadge}
+              onPress={() => promptUpdate(latestRelease)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="arrow-up-circle" size={14} color="#fff" />
+              <Text style={styles.updateBadgeText}>新版</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
         {hasPermission === false && (
           <View style={styles.warningBox}>
-            <Text style={styles.warningText}>未获得麦克风权限，无法录音。</Text>
-            <Button title="去授权" onPress={async () => setHasPermission(await checkPermission())} />
+            <Ionicons name="warning-outline" size={22} color="#E65100" />
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={styles.warningText}>未获得麦克风权限，无法录音。</Text>
+            </View>
+            <TouchableOpacity
+              style={styles.warningButton}
+              onPress={async () => setHasPermission(await checkPermission())}
+            >
+              <Text style={styles.warningButtonText}>去授权</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {isFallbackMode && (
+          <View style={styles.infoBox}>
+            <Ionicons name="information-circle-outline" size={22} color="#0066CC" />
+            <Text style={styles.infoText}>
+              当前运行在兼容模式，仅检测音量，不区分鼾声/磨牙等事件。
+            </Text>
           </View>
         )}
 
         <View style={styles.timerBox}>
-          <Text style={styles.timerLabel}>本次睡眠</Text>
+          <Text style={styles.timerLabel}>{isMonitoring ? '监测中' : '本次睡眠'}</Text>
           <Text style={styles.timerValue}>{formatDuration(elapsedSeconds)}</Text>
         </View>
 
-        <View style={styles.statsRow}>
-          <View style={styles.statBox}>
+        <View style={styles.statsGrid}>
+          <View style={[styles.statCard, { borderLeftColor: THEME.snore }]}>
+            <Ionicons name="volume-high-outline" size={22} color={THEME.snore} />
             <Text style={styles.statValue}>{snoreCount}</Text>
             <Text style={styles.statLabel}>打鼾</Text>
           </View>
-          <View style={styles.statBox}>
+          <View style={[styles.statCard, { borderLeftColor: THEME.grind }]}>
+            <Ionicons name="git-branch-outline" size={22} color={THEME.grind} />
             <Text style={styles.statValue}>{grindCount}</Text>
             <Text style={styles.statLabel}>磨牙</Text>
           </View>
-          <View style={styles.statBox}>
+          <View style={[styles.statCard, { borderLeftColor: THEME.talk }]}>
+            <Ionicons name="chatbubble-outline" size={22} color={THEME.talk} />
             <Text style={styles.statValue}>{talkCount}</Text>
             <Text style={styles.statLabel}>梦话</Text>
           </View>
-          <View style={styles.statBox}>
+          <View style={[styles.statCard, { borderLeftColor: THEME.apnea }]}>
+            <Ionicons name="pulse-outline" size={22} color={THEME.apnea} />
             <Text style={styles.statValue}>{apneaCount}</Text>
             <Text style={styles.statLabel}>呼吸暂停</Text>
           </View>
         </View>
 
         <View style={styles.volumeBox}>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+          <View style={styles.volumeHeader}>
             <Text style={styles.volumeLabel}>实时音量</Text>
-            <Text style={styles.volumeThreshold}>鼾声阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
+            <View style={styles.badge}>
+              <Text style={styles.badgeText}>鼾声阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
+            </View>
           </View>
           <View style={styles.volumeBarBg}>
             <View
@@ -996,28 +1276,33 @@ export default function App() {
                 styles.volumeBarFill,
                 {
                   width: `${Math.min(100, Math.max(0, (volumeDb + 80) / 80 * 100))}%`,
-                  backgroundColor: isSnoringNow ? '#FF6B6B' : '#4ECDC4',
+                  backgroundColor: isSnoringNow ? THEME.danger : THEME.primary,
                 },
               ]}
             />
           </View>
-          <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+          <View style={styles.volumeRow}>
             <Text style={styles.volumeDb}>{volumeDb.toFixed(1)} dB</Text>
-            <Text style={[styles.volumeDb, { color: isSnoringNow ? '#FF6B6B' : '#7A8B9C', fontWeight: isSnoringNow ? '700' : '400' }]}>
-              {isSnoringNow ? '● 检测到声音' : '○ 安静'}
+            <Text style={[styles.volumeState, { color: isSnoringNow ? THEME.danger : THEME.textSecondary }]}>
+              {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
             </Text>
           </View>
-          <Text style={[styles.volumeDb, { color: '#FFD93D', marginTop: 4 }]}>
-            本次最大音量: {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
-          </Text>
-          <Text style={[styles.volumeDb, { color: '#4ECDC4', marginTop: 4 }]}>
-            模型: {topClass} {(topConfidence * 100).toFixed(1)}% · 鼾{(snoreConfidence * 100).toFixed(0)}% 磨{(grindConfidence * 100).toFixed(0)}% 话{(talkConfidence * 100).toFixed(0)}% 停{(apneaConfidence * 100).toFixed(0)}%
-          </Text>
-          {snoreIntensity && (
-            <Text style={[styles.volumeDb, { color: getIntensityColor(snoreIntensity), marginTop: 4 }]}>
-              鼾声强度: {getIntensityLabel(snoreIntensity)}
+          <View style={styles.modelRow}>
+            <Ionicons name="analytics-outline" size={14} color={THEME.textTertiary} />
+            <Text style={[styles.volumeDb, styles.modelText]}>
+              {getClassLabel(topClass)} {(topConfidence * 100).toFixed(0)}% · 鼾{(snoreConfidence * 100).toFixed(0)}% 磨{(grindConfidence * 100).toFixed(0)}% 话{(talkConfidence * 100).toFixed(0)}% 停{(apneaConfidence * 100).toFixed(0)}%
             </Text>
+          </View>
+          {snoreIntensity && (
+            <View style={[styles.intensityBadge, { backgroundColor: getIntensityColor(snoreIntensity) + '20' }]}>
+              <Text style={[styles.volumeDb, { color: getIntensityColor(snoreIntensity), fontWeight: '700' }]}>
+                鼾声强度：{getIntensityLabel(snoreIntensity)}
+              </Text>
+            </View>
           )}
+          <Text style={[styles.volumeDb, { color: THEME.warning, marginTop: 8 }]}>
+            本次最大：{maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
+          </Text>
         </View>
 
         <TouchableOpacity
@@ -1033,24 +1318,35 @@ export default function App() {
           {isBusy ? (
             <ActivityIndicator size="small" color="#fff" />
           ) : (
-            <Text style={styles.mainButtonText}>
-              {isMonitoring ? '停止监测' : '开始睡眠监测'}
-            </Text>
+            <>
+              <Ionicons
+                name={isMonitoring ? 'square' : 'play'}
+                size={20}
+                color="#fff"
+                style={{ marginRight: 8 }}
+              />
+              <Text style={styles.mainButtonText}>
+                {isMonitoring ? '停止监测' : '开始睡眠监测'}
+              </Text>
+            </>
           )}
         </TouchableOpacity>
 
         {isMonitoring && (
-          <Text style={styles.tipText}>
-            监测中…请保持应用在屏幕上，建议连接充电器。
-          </Text>
+          <View style={styles.tipRow}>
+            <Ionicons name="battery-charging-outline" size={14} color={THEME.textTertiary} />
+            <Text style={styles.tipText}>监测中…建议连接充电器，保持屏幕常亮</Text>
+          </View>
         )}
       </View>
 
       <View style={styles.navRow}>
         <TouchableOpacity style={styles.navButton} onPress={() => setScreen('history')}>
+          <Ionicons name="time-outline" size={22} color={THEME.primary} />
           <Text style={styles.navButtonText}>历史记录</Text>
         </TouchableOpacity>
         <TouchableOpacity style={styles.navButton} onPress={() => setScreen('settings')}>
+          <Ionicons name="options-outline" size={22} color={THEME.primary} />
           <Text style={styles.navButtonText}>灵敏度设置</Text>
         </TouchableOpacity>
       </View>
@@ -1061,7 +1357,7 @@ export default function App() {
     <View style={styles.flex}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Text style={styles.backText}>← 返回</Text>
+          <Ionicons name="chevron-back" size={26} color={THEME.primary} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>历史记录</Text>
         <View style={{ width: 40 }} />
@@ -1072,7 +1368,11 @@ export default function App() {
         contentContainerStyle={{ padding: 16 }}
         ListEmptyComponent={
           <View style={styles.emptyBox}>
+            <View style={styles.emptyIconCircle}>
+              <Ionicons name="bed-outline" size={48} color={THEME.primary} />
+            </View>
             <Text style={styles.emptyText}>暂无睡眠记录</Text>
+            <Text style={styles.emptySubText}>点击首页“开始睡眠监测”，记录整晚声音</Text>
           </View>
         }
         renderItem={({ item }) => (
@@ -1084,17 +1384,38 @@ export default function App() {
               setPlaybackDurMs(0);
               setScreen('detail');
             }}
+            activeOpacity={0.85}
           >
             <View style={styles.historyRow}>
-              <View>
+              <View style={{ flex: 1 }}>
                 <Text style={styles.historyTime}>{formatTime(item.startTime)}</Text>
-                <Text style={styles.historyMeta}>
-                  睡眠 {formatDuration(item.durationSeconds)} · 鼾{item.snoreCount} · 磨{item.grindCount} · 话{item.talkCount} · 停{item.apneaCount}
-                </Text>
+                <View style={styles.historyMetaRow}>
+                  <Ionicons name="time-outline" size={14} color={THEME.textTertiary} />
+                  <Text style={styles.historyMeta}>睡眠 {formatDuration(item.durationSeconds)}</Text>
+                </View>
+                <View style={styles.historyCountRow}>
+                  <View style={[styles.historyCount, { backgroundColor: `${THEME.snore}15` }]}>
+                    <Ionicons name="volume-high-outline" size={14} color={THEME.snore} />
+                    <Text style={[styles.historyCountText, { color: THEME.snore }]}>{item.snoreCount}</Text>
+                  </View>
+                  <View style={[styles.historyCount, { backgroundColor: `${THEME.grind}15` }]}>
+                    <Ionicons name="git-branch-outline" size={14} color={THEME.grind} />
+                    <Text style={[styles.historyCountText, { color: THEME.grind }]}>{item.grindCount}</Text>
+                  </View>
+                  <View style={[styles.historyCount, { backgroundColor: `${THEME.talk}15` }]}>
+                    <Ionicons name="chatbubble-outline" size={14} color={THEME.talk} />
+                    <Text style={[styles.historyCountText, { color: THEME.talk }]}>{item.talkCount}</Text>
+                  </View>
+                  <View style={[styles.historyCount, { backgroundColor: `${THEME.apnea}15` }]}>
+                    <Ionicons name="pulse-outline" size={14} color={THEME.apnea} />
+                    <Text style={[styles.historyCountText, { color: THEME.apnea }]}>{item.apneaCount}</Text>
+                  </View>
+                </View>
               </View>
               <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore) }]}>
                 <Text style={styles.qualityText}>{item.qualityScore}分</Text>
               </View>
+              <Ionicons name="chevron-forward" size={20} color={THEME.textTertiary} style={{ marginLeft: 8 }} />
             </View>
           </TouchableOpacity>
         )}
@@ -1108,39 +1429,51 @@ export default function App() {
       <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <View style={styles.header}>
           <TouchableOpacity onPress={() => setScreen('history')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Text style={styles.backText}>← 返回</Text>
+            <Ionicons name="chevron-back" size={26} color={THEME.primary} />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>记录详情</Text>
           <View style={{ width: 40 }} />
         </View>
 
         <View style={styles.card}>
-          <Text style={styles.detailTime}>{formatTime(selectedSession.startTime)}</Text>
-          <View style={styles.detailStats}>
-            <View style={styles.detailStat}>
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.durationSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>睡眠时长</Text>
+          <View style={styles.detailHeader}>
+            <View style={[styles.detailIconCircle, { backgroundColor: `${THEME.primary}15` }]}>
+              <Ionicons name="moon-outline" size={24} color={THEME.primary} />
             </View>
-            <View style={styles.detailStat}>
-              <Text style={styles.detailStatValue}>{selectedSession.snoreCount}</Text>
-              <Text style={styles.detailStatLabel}>打鼾</Text>
-            </View>
-            <View style={styles.detailStat}>
-              <Text style={styles.detailStatValue}>{selectedSession.grindCount}</Text>
-              <Text style={styles.detailStatLabel}>磨牙</Text>
+            <View>
+              <Text style={styles.detailTime}>{formatTime(selectedSession.startTime)}</Text>
+              <Text style={styles.detailSubTime}>睡眠时长 {formatDuration(selectedSession.durationSeconds)}</Text>
             </View>
           </View>
 
-          <View style={styles.detailStats}>
-            <View style={styles.detailStat}>
+          <View style={styles.detailStatsGrid}>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="time-outline" size={20} color={THEME.primary} />
+              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.durationSeconds)}</Text>
+              <Text style={styles.detailStatLabel}>睡眠时长</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="volume-high-outline" size={20} color={THEME.snore} />
+              <Text style={styles.detailStatValue}>{selectedSession.snoreCount}</Text>
+              <Text style={styles.detailStatLabel}>打鼾</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="git-branch-outline" size={20} color={THEME.grind} />
+              <Text style={styles.detailStatValue}>{selectedSession.grindCount}</Text>
+              <Text style={styles.detailStatLabel}>磨牙</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="chatbubble-outline" size={20} color={THEME.talk} />
               <Text style={styles.detailStatValue}>{selectedSession.talkCount}</Text>
               <Text style={styles.detailStatLabel}>梦话</Text>
             </View>
-            <View style={styles.detailStat}>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="pulse-outline" size={20} color={THEME.apnea} />
               <Text style={styles.detailStatValue}>{selectedSession.apneaCount}</Text>
               <Text style={styles.detailStatLabel}>呼吸暂停</Text>
             </View>
-            <View style={styles.detailStat}>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="volume-medium-outline" size={20} color={THEME.warning} />
               <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalSnoreSeconds)}</Text>
               <Text style={styles.detailStatLabel}>鼾声时长</Text>
             </View>
@@ -1150,23 +1483,25 @@ export default function App() {
             <Text style={styles.qualityTextLarge}>睡眠质量 {selectedSession.qualityScore} 分</Text>
           </View>
 
-          <View style={[styles.qualityBadgeLarge, { backgroundColor: getApneaRiskColor(selectedSession.apneaRisk || 'low'), marginTop: -12 }]}>
+          <View style={[styles.qualityBadgeLarge, { backgroundColor: getApneaRiskColor(selectedSession.apneaRisk || 'low'), marginTop: -10 }]}>
             <Text style={styles.qualityTextLarge}>呼吸暂停风险 {getApneaRiskLabel(selectedSession.apneaRisk || 'low')}</Text>
           </View>
 
           {selectedSession.intensityBreakdown && selectedSession.snoreCount > 0 && (
-            <View style={{ marginBottom: 20 }}>
-              <Text style={styles.sectionTitle}>鼾声强度分布</Text>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-around' }}>
-                <View style={styles.detailStat}>
+            <View style={{ marginBottom: 24 }}>
+              <Text style={styles.sectionTitle}>
+                <Ionicons name="stats-chart-outline" size={16} color={THEME.text} /> 鼾声强度分布
+              </Text>
+              <View style={styles.intensityRow}>
+                <View style={[styles.intensityBlock, { backgroundColor: '#2ECC7120' }]}>
                   <Text style={[styles.detailStatValue, { color: '#2ECC71' }]}>{selectedSession.intensityBreakdown.mild}</Text>
                   <Text style={styles.detailStatLabel}>轻度</Text>
                 </View>
-                <View style={styles.detailStat}>
+                <View style={[styles.intensityBlock, { backgroundColor: '#F1C40F20' }]}>
                   <Text style={[styles.detailStatValue, { color: '#F1C40F' }]}>{selectedSession.intensityBreakdown.moderate}</Text>
                   <Text style={styles.detailStatLabel}>中度</Text>
                 </View>
-                <View style={styles.detailStat}>
+                <View style={[styles.intensityBlock, { backgroundColor: '#E74C3C20' }]}>
                   <Text style={[styles.detailStatValue, { color: '#E74C3C' }]}>{selectedSession.intensityBreakdown.severe}</Text>
                   <Text style={styles.detailStatLabel}>重度</Text>
                 </View>
@@ -1176,30 +1511,32 @@ export default function App() {
 
           {selectedSession.recordingUri ? (
             <View style={styles.recordingBox}>
-              <Text style={styles.sectionTitle}>录音回放</Text>
+              <Text style={styles.sectionTitle}>
+                <Ionicons name="mic-outline" size={16} color={THEME.text} /> 录音回放
+              </Text>
               <TouchableOpacity
                 style={[styles.mainButton, isPlaying ? styles.stopButton : styles.startButton]}
                 onPress={() =>
                   isPlaying ? stopPlayback() : playRecording(selectedSession.recordingUri!)
                 }
               >
+                <Ionicons name={isPlaying ? 'square' : 'play'} size={18} color="#fff" style={{ marginRight: 8 }} />
                 <Text style={styles.mainButtonText}>{isPlaying ? '停止播放' : '播放录音'}</Text>
               </TouchableOpacity>
-              {/* 播放进度条 */}
               {playbackDurMs > 0 && (
-                <View style={{ marginTop: 12 }}>
+                <View style={{ marginTop: 16 }}>
                   <View style={styles.volumeBarBg}>
                     <View
                       style={[
                         styles.volumeBarFill,
                         {
                           width: `${Math.min(100, (playbackPosMs / playbackDurMs) * 100)}%`,
-                          backgroundColor: '#4ECDC4',
+                          backgroundColor: THEME.primary,
                         },
                       ]}
                     />
                   </View>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 4 }}>
+                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
                     <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackPosMs / 1000))}</Text>
                     <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackDurMs / 1000))}</Text>
                   </View>
@@ -1207,43 +1544,65 @@ export default function App() {
               )}
             </View>
           ) : (
-            <Text style={styles.noRecordingText}>未保存录音</Text>
+            <View style={styles.emptyRecordingBox}>
+              <Ionicons name="mic-off-outline" size={32} color={THEME.textTertiary} />
+              <Text style={styles.noRecordingText}>未保存录音</Text>
+            </View>
           )}
 
-          <Text style={styles.sectionTitle}>异常声音事件（点击跳转播放）</Text>
+          <Text style={styles.sectionTitle}>
+            <Ionicons name="list-outline" size={16} color={THEME.text} /> 异常声音事件
+          </Text>
           {selectedSession.events.length === 0 ? (
-            <Text style={styles.noRecordingText}>未检测到异常声音事件</Text>
+            <View style={styles.emptyEventBox}>
+              <View style={[styles.eventIconCircle, { backgroundColor: `${THEME.success}15` }]}>
+                <Ionicons name="checkmark-circle-outline" size={24} color={THEME.success} />
+              </View>
+              <Text style={styles.noRecordingText}>未检测到异常声音事件</Text>
+            </View>
           ) : (
-            selectedSession.events.map((evt, idx) => {
-              const absStart = selectedSession.startTime + evt.start;
-              const isCurrent =
-                isPlaying && playbackPosMs >= evt.start - 500 && playbackPosMs <= evt.end + 500;
-              return (
-                <TouchableOpacity
-                  key={idx}
-                  style={[styles.eventRow, isCurrent ? { backgroundColor: 'rgba(78,205,196,0.15)' } : {}]}
-                  onPress={() => selectedSession.recordingUri && seekToEvent(evt)}
-                  disabled={!selectedSession.recordingUri}
-                >
-                  <Text style={[styles.eventIndex, { color: getEventColor(evt.type) }]}>
-                    #{idx + 1} {getEventLabel(evt.type, evt.intensity)}
-                  </Text>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.eventClock}>{formatClock(absStart)}</Text>
-                    <Text style={styles.eventDuration}>{(evt.duration / 1000).toFixed(1)}秒</Text>
-                  </View>
-                  {selectedSession.recordingUri && (
-                    <Text style={[styles.eventIndex, { color: '#4ECDC4', fontSize: 12 }]}>▶ 跳转</Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })
+            <View style={styles.timeline}>
+              {selectedSession.events.map((evt, idx) => {
+                const absStart = selectedSession.startTime + evt.start;
+                const isCurrent =
+                  isPlaying && playbackPosMs >= evt.start - 500 && playbackPosMs <= evt.end + 500;
+                const iconName =
+                  evt.type === 'snore' ? 'volume-high-outline' :
+                  evt.type === 'grind' ? 'git-branch-outline' :
+                  evt.type === 'talk' ? 'chatbubble-outline' : 'pulse-outline';
+                return (
+                  <TouchableOpacity
+                    key={idx}
+                    style={[
+                      styles.eventRow,
+                      { borderLeftColor: getEventColor(evt.type) },
+                      isCurrent ? { backgroundColor: `${THEME.primary}12` } : {},
+                    ]}
+                    onPress={() => selectedSession.recordingUri && seekToEvent(evt)}
+                    disabled={!selectedSession.recordingUri}
+                    activeOpacity={0.85}
+                  >
+                    <View style={[styles.eventIconCircle, { backgroundColor: `${getEventColor(evt.type)}15` }]}>
+                      <Ionicons name={iconName as any} size={18} color={getEventColor(evt.type)} />
+                    </View>
+                    <View style={styles.eventBody}>
+                      <Text style={[styles.eventIndex, { color: getEventColor(evt.type) }]}>
+                        #{idx + 1} {getEventLabel(evt.type, evt.intensity)}
+                      </Text>
+                      <Text style={styles.eventClock}>{formatClock(absStart)} · {(evt.duration / 1000).toFixed(1)}秒</Text>
+                    </View>
+                    {selectedSession.recordingUri && (
+                      <Ionicons name="play-circle-outline" size={24} color={THEME.primary} />
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           )}
 
           <View style={{ height: 16 }} />
-          <Button
-            title="删除此记录"
-            color="#FF6B6B"
+          <TouchableOpacity
+            style={[styles.mainButton, styles.stopButton]}
             onPress={() =>
               Alert.alert('确认删除', '删除后无法恢复，录音也将被删除。', [
                 { text: '取消', style: 'cancel' },
@@ -1257,7 +1616,10 @@ export default function App() {
                 },
               ])
             }
-          />
+          >
+            <Ionicons name="trash-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.mainButtonText}>删除此记录</Text>
+          </TouchableOpacity>
         </View>
       </ScrollView>
     );
@@ -1267,111 +1629,190 @@ export default function App() {
     <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <View style={styles.header}>
         <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Text style={styles.backText}>← 返回</Text>
+          <Ionicons name="chevron-back" size={26} color={THEME.primary} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>灵敏度设置</Text>
+        <Text style={styles.headerTitle}>设置</Text>
         <View style={{ width: 40 }} />
       </View>
 
       <View style={styles.card}>
-        <Text style={styles.sectionTitle}>鼾声检测阈值</Text>
-        <Text style={styles.settingsDesc}>
-          本版本使用 Google YAMNet 521 类音频模型，原生模块已聚合出“打鼾 / 磨牙 / 梦话 / 呼吸暂停 / 噪音”五类置信度。
-          App 会再用下方阈值做二次过滤：只有当“打鼾”置信度不低于该阈值，且连续满足条件达到最小持续时间，才会被记录为一次打鼾事件。
-          阈值越低越灵敏，可能把环境音误判为鼾声；阈值越高越保守，可能漏掉轻微鼾声。推荐 40%–60%。
-        </Text>
-        <Text style={styles.thresholdValue}>{(snoreThreshold * 100).toFixed(0)}%</Text>
-        <View style={styles.sliderRow}>
-          <TouchableOpacity
-            style={styles.adjustButton}
-            onPress={() => {
-              const val = Math.max(0.1, parseFloat((snoreThreshold - 0.05).toFixed(2)));
-              setSnoreThreshold(val);
-              saveSettings(val, grindThreshold);
-            }}
-          >
-            <Text style={styles.adjustButtonText}>-</Text>
-          </TouchableOpacity>
-          <Text style={styles.thresholdRangeText}>灵敏度</Text>
-          <TouchableOpacity
-            style={styles.adjustButton}
-            onPress={() => {
-              const val = Math.min(0.9, parseFloat((snoreThreshold + 0.05).toFixed(2)));
-              setSnoreThreshold(val);
-              saveSettings(val, grindThreshold);
-            }}
-          >
-            <Text style={styles.adjustButtonText}>+</Text>
-          </TouchableOpacity>
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.snore}20` }]}>
+              <Ionicons name="volume-high-outline" size={20} color={THEME.snore} />
+            </View>
+            <Text style={styles.sectionTitle}>鼾声检测阈值</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            YAMNet 模型聚合出“打鼾 / 磨牙 / 梦话 / 呼吸暂停 / 噪音”五类置信度。只有当“打鼾”置信度不低于该阈值，且连续满足条件达到最小持续时间，才会被记录为一次打鼾。推荐 40%–60%。
+          </Text>
+          <Text style={styles.thresholdValue}>{(snoreThreshold * 100).toFixed(0)}%</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.snore}20` }]}
+              onPress={() => {
+                const val = Math.max(0.1, parseFloat((snoreThreshold - 0.05).toFixed(2)));
+                setSnoreThreshold(val);
+                saveSettings(val, grindThreshold);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.snore }]}>-</Text>
+            </TouchableOpacity>
+            <View style={styles.thresholdTrack}>
+              <View
+                style={[
+                  styles.thresholdFill,
+                  { width: `${((snoreThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: THEME.snore },
+                ]}
+              />
+            </View>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.snore}20` }]}
+              onPress={() => {
+                const val = Math.min(0.9, parseFloat((snoreThreshold + 0.05).toFixed(2)));
+                setSnoreThreshold(val);
+                saveSettings(val, grindThreshold);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.snore }]}>+</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        <View style={{ height: 1, backgroundColor: '#E8EDF2', marginVertical: 20 }} />
+        <View style={styles.divider} />
 
-        <Text style={styles.sectionTitle}>磨牙检测阈值</Text>
-        <Text style={styles.settingsDesc}>
-          YAMNet 模型通过“咀嚼 / 咬合”类声音来识别磨牙（bruxism）候选。当“磨牙”聚合置信度不低于该阈值，且事件持续时间在 0.3–1.5 秒之间，才会被记录为一次磨牙。
-          阈值越低越灵敏，可能把翻身、衣物摩擦等误判为磨牙；阈值越高越保守，可能漏掉轻微磨牙。推荐 30%–45%。
-        </Text>
-        <Text style={styles.thresholdValue}>{(grindThreshold * 100).toFixed(0)}%</Text>
-        <View style={styles.sliderRow}>
-          <TouchableOpacity
-            style={styles.adjustButton}
-            onPress={() => {
-              const val = Math.max(0.1, parseFloat((grindThreshold - 0.05).toFixed(2)));
-              setGrindThreshold(val);
-              saveSettings(snoreThreshold, val);
-            }}
-          >
-            <Text style={styles.adjustButtonText}>-</Text>
-          </TouchableOpacity>
-          <Text style={styles.thresholdRangeText}>灵敏度</Text>
-          <TouchableOpacity
-            style={styles.adjustButton}
-            onPress={() => {
-              const val = Math.min(0.9, parseFloat((grindThreshold + 0.05).toFixed(2)));
-              setGrindThreshold(val);
-              saveSettings(snoreThreshold, val);
-            }}
-          >
-            <Text style={styles.adjustButtonText}>+</Text>
-          </TouchableOpacity>
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.grind}20` }]}>
+              <Ionicons name="git-branch-outline" size={20} color={THEME.grind} />
+            </View>
+            <Text style={styles.sectionTitle}>磨牙检测阈值</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            通过“咀嚼 / 咬合 / 摩擦”类声音识别磨牙候选。当“磨牙”聚合置信度不低于该阈值，且事件持续时间在 0.3–1.5 秒之间，才会被记录。推荐 30%–45%。
+          </Text>
+          <Text style={styles.thresholdValue}>{(grindThreshold * 100).toFixed(0)}%</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.grind}20` }]}
+              onPress={() => {
+                const val = Math.max(0.1, parseFloat((grindThreshold - 0.05).toFixed(2)));
+                setGrindThreshold(val);
+                saveSettings(snoreThreshold, val);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.grind }]}>-</Text>
+            </TouchableOpacity>
+            <View style={styles.thresholdTrack}>
+              <View
+                style={[
+                  styles.thresholdFill,
+                  { width: `${((grindThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: THEME.grind },
+                ]}
+              />
+            </View>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.grind}20` }]}
+              onPress={() => {
+                const val = Math.min(0.9, parseFloat((grindThreshold + 0.05).toFixed(2)));
+                setGrindThreshold(val);
+                saveSettings(snoreThreshold, val);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.grind }]}>+</Text>
+            </TouchableOpacity>
+          </View>
         </View>
-        <Button
-          title="恢复默认"
+
+        <TouchableOpacity
+          style={[styles.mainButton, { backgroundColor: THEME.textTertiary, marginTop: 8 }]}
           onPress={() => {
             setSnoreThreshold(DEFAULT_SNORE_CONFIDENCE);
             setGrindThreshold(DEFAULT_GRIND_CONFIDENCE);
             saveSettings(DEFAULT_SNORE_CONFIDENCE, DEFAULT_GRIND_CONFIDENCE);
           }}
-        />
+        >
+          <Ionicons name="refresh-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+          <Text style={styles.mainButtonText}>恢复默认</Text>
+        </TouchableOpacity>
+      </View>
 
-        <View style={{ height: 1, backgroundColor: '#E8EDF2', marginVertical: 20 }} />
-
-        <Text style={styles.sectionTitle}>应用更新</Text>
-        <Text style={styles.settingsDesc}>
-          当前版本：{CURRENT_VERSION}
-          {latestRelease && updateCheckState === 'available' && ` → 最新版本：${latestRelease.version}`}
-        </Text>
-        {updateCheckState === 'available' && latestRelease && (
+      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.primary}20` }]}>
+              <Ionicons name="cloud-download-outline" size={20} color={THEME.primary} />
+            </View>
+            <Text style={styles.sectionTitle}>应用更新</Text>
+          </View>
+          <View style={styles.versionRow}>
+            <Text style={styles.settingsDesc}>当前版本 {CURRENT_VERSION}</Text>
+            {updateCheckState === 'available' && latestRelease && (
+              <View style={styles.newVersionBadge}>
+                <Text style={styles.newVersionBadgeText}>可更新至 {latestRelease.version}</Text>
+              </View>
+            )}
+          </View>
+          {updateCheckState === 'available' && latestRelease && (
+            <TouchableOpacity
+              style={[styles.mainButton, styles.startButton, { marginBottom: 12 }]}
+              onPress={() => downloadAndInstallApk(latestRelease.downloadUrl)}
+            >
+              <Ionicons name="download-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+              <Text style={styles.mainButtonText}>下载最新版本 APK</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
-            style={[styles.mainButton, styles.startButton, { marginBottom: 12 }]}
-            onPress={() => downloadAndInstallApk(latestRelease.downloadUrl)}
+            style={[
+              styles.mainButton,
+              updateCheckState === 'checking' && { opacity: 0.6 },
+              { backgroundColor: THEME.primary },
+            ]}
+            onPress={() => checkUpdate(true)}
+            disabled={updateCheckState === 'checking'}
           >
-            <Text style={styles.mainButtonText}>下载最新版本 APK</Text>
+            <Ionicons name="refresh-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.mainButtonText}>
+              {updateCheckState === 'checking' ? '检查中…' : '检查更新'}
+            </Text>
           </TouchableOpacity>
-        )}
-        <Button
-          title={updateCheckState === 'checking' ? '检查中…' : '检查更新'}
-          onPress={() => checkUpdate(true)}
-          disabled={updateCheckState === 'checking'}
-        />
+        </View>
+      </View>
+
+      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.warning}20` }]}>
+              <Ionicons name="trash-outline" size={20} color={THEME.warning} />
+            </View>
+            <Text style={styles.sectionTitle}>存储空间</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            清理过期的录音和临时缓存文件，释放手机存储空间（历史记录不会被删除）。
+          </Text>
+          <TouchableOpacity
+            style={[styles.mainButton, { backgroundColor: THEME.warning }]}
+            onPress={async () => {
+              try {
+                await cleanOldRecordings();
+                await cleanAppCache();
+                Alert.alert('清理完成', '已清理过期录音和应用缓存。');
+              } catch (e) {
+                Alert.alert('清理失败', String(e));
+              }
+            }}
+          >
+            <Ionicons name="sparkles-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.mainButtonText}>清理缓存</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
   );
 
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar style="auto" />
+      <StatusBar style="dark" />
       {screen === 'home' && renderHome()}
       {screen === 'history' && renderHistory()}
       {screen === 'detail' && renderDetail()}
@@ -1385,6 +1826,9 @@ export default function App() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.updateModal}>
+            <View style={styles.updateIconCircle}>
+              <Ionicons name="cloud-download-outline" size={32} color={THEME.primary} />
+            </View>
             <Text style={styles.updateModalTitle}>正在下载更新</Text>
             <Text style={styles.updateModalStatus}>{downloadStatus}</Text>
             <View style={styles.progressTrack}>
@@ -1471,10 +1915,21 @@ function getEventLabel(type: SoundEvent['type'], intensity?: SoundEvent['intensi
   return base;
 }
 
+function getClassLabel(classKey: string): string {
+  switch (classKey) {
+    case 'snoring': return '打鼾';
+    case 'grinding': return '磨牙';
+    case 'talking': return '梦话';
+    case 'apnea': return '呼吸暂停';
+    case 'noise': return '环境音';
+    default: return classKey;
+  }
+}
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#F5F7FA',
+    backgroundColor: THEME.background,
   },
   center: {
     alignItems: 'center',
@@ -1482,196 +1937,298 @@ const styles = StyleSheet.create({
   },
   loadingText: {
     marginTop: 16,
-    color: '#7A8B9C',
+    color: THEME.textSecondary,
+    fontSize: 15,
   },
   flex: {
     flex: 1,
   },
   homeContent: {
     padding: 16,
-    paddingTop: 24,
+    paddingTop: 20,
   },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 24,
+  heroCard: {
+    backgroundColor: THEME.card,
+    borderRadius: 28,
+    padding: 22,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 24,
+    elevation: 6,
+  },
+  heroHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  appIconCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    backgroundColor: THEME.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: THEME.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
     shadowRadius: 8,
-    elevation: 3,
+    elevation: 4,
   },
   title: {
-    fontSize: 28,
-    fontWeight: '700',
-    color: '#1A2B3C',
-    textAlign: 'center',
+    fontSize: 24,
+    fontWeight: '800',
+    color: THEME.text,
   },
   subtitle: {
-    fontSize: 14,
-    color: '#7A8B9C',
-    textAlign: 'center',
-    marginTop: 6,
-    marginBottom: 20,
+    fontSize: 13,
+    color: THEME.textTertiary,
+    marginTop: 2,
   },
   warningBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: '#FFF3E0',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 16,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 14,
   },
   warningText: {
+    flex: 1,
     color: '#E65100',
-    marginBottom: 8,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  warningButton: {
+    backgroundColor: '#E65100',
+    borderRadius: 10,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginLeft: 8,
+  },
+  warningButtonText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  infoBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#E3F2FD',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 14,
+  },
+  infoText: {
+    flex: 1,
+    color: '#0066CC',
+    fontSize: 13,
+    lineHeight: 18,
+    marginLeft: 12,
   },
   timerBox: {
     alignItems: 'center',
-    marginVertical: 16,
+    marginVertical: 18,
   },
   timerLabel: {
-    fontSize: 14,
-    color: '#7A8B9C',
+    fontSize: 13,
+    color: THEME.textTertiary,
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: 6,
   },
   timerValue: {
-    fontSize: 48,
-    fontWeight: '200',
-    color: '#1A2B3C',
+    fontSize: 52,
+    fontWeight: '300',
+    color: THEME.text,
     fontVariant: ['tabular-nums'],
   },
-  statsRow: {
+  statsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 24,
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 20,
   },
-  statBox: {
+  statCard: {
+    width: (SCREEN_W - 64) / 2,
+    backgroundColor: THEME.background,
+    borderRadius: 20,
+    paddingVertical: 16,
+    paddingHorizontal: 12,
     alignItems: 'center',
+    marginBottom: 12,
+    borderLeftWidth: 4,
+    borderLeftColor: THEME.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
   },
   statValue: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1A2B3C',
+    fontSize: 22,
+    fontWeight: '800',
+    color: THEME.text,
     fontVariant: ['tabular-nums'],
+    marginTop: 6,
   },
   statLabel: {
     fontSize: 12,
-    color: '#7A8B9C',
-    marginTop: 4,
+    color: THEME.textSecondary,
+    marginTop: 2,
   },
   volumeBox: {
-    marginBottom: 24,
+    backgroundColor: THEME.background,
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 20,
   },
   volumeLabel: {
     fontSize: 14,
-    color: '#7A8B9C',
-    marginBottom: 8,
+    fontWeight: '700',
+    color: THEME.text,
   },
   volumeBarBg: {
-    height: 14,
-    backgroundColor: '#E8EDF2',
-    borderRadius: 7,
+    height: 12,
+    backgroundColor: THEME.border,
+    borderRadius: 6,
     overflow: 'hidden',
   },
   volumeBarFill: {
     height: '100%',
-    borderRadius: 7,
+    borderRadius: 6,
   },
   volumeDb: {
     fontSize: 12,
-    color: '#7A8B9C',
+    color: THEME.textSecondary,
     marginTop: 6,
-    textAlign: 'right',
   },
-  volumeThreshold: {
+  badge: {
+    backgroundColor: `${THEME.primary}15`,
+    borderRadius: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+  },
+  badgeText: {
     fontSize: 12,
-    color: '#FF6B6B',
-    fontWeight: '600',
+    fontWeight: '700',
+    color: THEME.primary,
+  },
+  modelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 8,
+  },
+  modelText: {
+    marginLeft: 6,
+    textAlign: 'left',
+  },
+  intensityBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    marginTop: 8,
   },
   mainButton: {
-    borderRadius: 16,
+    borderRadius: 20,
     paddingVertical: 18,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 10,
+    elevation: 4,
   },
   startButton: {
-    backgroundColor: '#4ECDC4',
+    backgroundColor: THEME.primary,
   },
   stopButton: {
-    backgroundColor: '#FF6B6B',
+    backgroundColor: THEME.danger,
   },
   mainButtonText: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 17,
     fontWeight: '700',
+  },
+  tipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
   },
   tipText: {
     fontSize: 12,
-    color: '#7A8B9C',
-    textAlign: 'center',
-    marginTop: 12,
+    color: THEME.textTertiary,
+    marginLeft: 6,
   },
   navRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginTop: 20,
+    marginTop: 16,
   },
   navButton: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
+    backgroundColor: THEME.card,
+    borderRadius: 20,
     paddingVertical: 16,
-    paddingHorizontal: 24,
     flex: 1,
     marginHorizontal: 6,
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 12,
+    elevation: 3,
   },
   navButtonText: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: '#1A2B3C',
+    fontSize: 14,
+    fontWeight: '700',
+    color: THEME.text,
+    marginTop: 6,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: (RNStatusBar.currentHeight || 0) + 16,
-    paddingBottom: 14,
-    backgroundColor: '#fff',
-  },
-  backText: {
-    fontSize: 16,
-    color: '#4ECDC4',
-    paddingVertical: 8,
-    paddingHorizontal: 8,
-    minWidth: 50,
+    paddingTop: (RNStatusBar.currentHeight || 0) + 12,
+    paddingBottom: 12,
+    backgroundColor: THEME.card,
+    borderBottomWidth: 1,
+    borderBottomColor: THEME.border,
   },
   headerTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1A2B3C',
+    fontSize: 17,
+    fontWeight: '800',
+    color: THEME.text,
   },
   emptyBox: {
     alignItems: 'center',
-    marginTop: 60,
+    marginTop: 80,
   },
   emptyText: {
-    color: '#7A8B9C',
-    fontSize: 16,
+    color: THEME.textSecondary,
+    fontSize: 17,
+    fontWeight: '700',
+    marginTop: 16,
+  },
+  emptySubText: {
+    color: THEME.textTertiary,
+    fontSize: 13,
+    marginTop: 6,
   },
   historyItem: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 18,
+    backgroundColor: THEME.card,
+    borderRadius: 20,
+    padding: 16,
     marginBottom: 12,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.06,
+    shadowRadius: 10,
+    elevation: 3,
   },
   historyRow: {
     flexDirection: 'row',
@@ -1680,13 +2237,37 @@ const styles = StyleSheet.create({
   },
   historyTime: {
     fontSize: 16,
-    fontWeight: '600',
-    color: '#1A2B3C',
+    fontWeight: '700',
+    color: THEME.text,
+  },
+  historyMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
   },
   historyMeta: {
     fontSize: 13,
-    color: '#7A8B9C',
-    marginTop: 4,
+    color: THEME.textSecondary,
+    marginLeft: 4,
+  },
+  historyCountRow: {
+    flexDirection: 'row',
+    marginTop: 10,
+  },
+  historyCount: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.background,
+    borderRadius: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    marginRight: 8,
+  },
+  historyCountText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: THEME.text,
+    marginLeft: 4,
   },
   qualityBadge: {
     borderRadius: 12,
@@ -1695,133 +2276,206 @@ const styles = StyleSheet.create({
   },
   qualityText: {
     color: '#fff',
-    fontWeight: '700',
+    fontWeight: '800',
     fontSize: 13,
   },
-  detailTime: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: '#1A2B3C',
-    textAlign: 'center',
-    marginBottom: 20,
+  card: {
+    backgroundColor: THEME.card,
+    borderRadius: 24,
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.05,
+    shadowRadius: 8,
+    elevation: 2,
   },
-  detailStats: {
+  detailTime: {
+    fontSize: 18,
+    fontWeight: '800',
+    color: THEME.text,
+    textAlign: 'center',
+    marginBottom: 18,
+  },
+  detailStatsGrid: {
     flexDirection: 'row',
-    justifyContent: 'space-around',
-    marginBottom: 20,
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  detailStatCard: {
+    width: (SCREEN_W - 72) / 3,
+    backgroundColor: THEME.background,
+    borderRadius: 16,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 10,
   },
   detailStat: {
     alignItems: 'center',
   },
   detailStatValue: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1A2B3C',
+    fontSize: 16,
+    fontWeight: '800',
+    color: THEME.text,
     fontVariant: ['tabular-nums'],
+    marginTop: 6,
   },
   detailStatLabel: {
-    fontSize: 12,
-    color: '#7A8B9C',
-    marginTop: 4,
+    fontSize: 11,
+    color: THEME.textSecondary,
+    marginTop: 2,
   },
   qualityBadgeLarge: {
-    borderRadius: 16,
+    borderRadius: 18,
     paddingVertical: 14,
     alignItems: 'center',
-    marginBottom: 24,
+    marginBottom: 14,
   },
   qualityTextLarge: {
     color: '#fff',
-    fontSize: 16,
-    fontWeight: '700',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  intensityRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  intensityBlock: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginHorizontal: 4,
   },
   recordingBox: {
     marginBottom: 24,
   },
+  emptyRecordingBox: {
+    alignItems: 'center',
+    backgroundColor: THEME.background,
+    borderRadius: 16,
+    paddingVertical: 24,
+    marginBottom: 24,
+  },
+  emptyEventBox: {
+    alignItems: 'center',
+    backgroundColor: '#2ECC7115',
+    borderRadius: 16,
+    paddingVertical: 24,
+    marginBottom: 16,
+  },
   sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1A2B3C',
+    fontSize: 15,
+    fontWeight: '800',
+    color: THEME.text,
     marginBottom: 12,
   },
   noRecordingText: {
-    color: '#7A8B9C',
-    marginBottom: 16,
+    color: THEME.textSecondary,
+    fontSize: 13,
+    marginTop: 8,
   },
   eventRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
     paddingVertical: 12,
-    paddingHorizontal: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E8EDF2',
+    paddingHorizontal: 10,
+    backgroundColor: THEME.card,
+    borderRadius: 14,
+    marginBottom: 10,
+    borderLeftWidth: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 6,
+    elevation: 1,
+  },
+  eventIconCircle: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   eventIndex: {
-    width: 70,
-    color: '#4ECDC4',
+    color: THEME.primary,
     fontWeight: '700',
-  },
-  eventTime: {
-    flex: 1,
-    color: '#1A2B3C',
-    fontVariant: ['tabular-nums'],
+    fontSize: 13,
   },
   eventClock: {
-    color: '#1A2B3C',
-    fontSize: 15,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  eventDuration: {
-    color: '#7A8B9C',
+    color: THEME.textSecondary,
     fontSize: 12,
+    marginTop: 2,
     fontVariant: ['tabular-nums'],
   },
   settingsDesc: {
-    fontSize: 14,
-    color: '#7A8B9C',
-    lineHeight: 20,
-    marginBottom: 16,
+    fontSize: 13,
+    color: THEME.textSecondary,
+    lineHeight: 19,
+    marginBottom: 12,
+  },
+  settingSection: {
+    marginBottom: 8,
+  },
+  settingHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  settingIconCircle: {
+    width: 36,
+    height: 36,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
   },
   thresholdValue: {
-    fontSize: 32,
-    fontWeight: '700',
-    color: '#1A2B3C',
+    fontSize: 36,
+    fontWeight: '800',
+    color: THEME.text,
     textAlign: 'center',
     marginBottom: 12,
   },
   sliderRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 24,
+    justifyContent: 'space-between',
   },
   adjustButton: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: '#4ECDC4',
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    backgroundColor: THEME.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    marginHorizontal: 16,
   },
   adjustButtonText: {
     color: '#fff',
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '700',
-    lineHeight: 28,
+    lineHeight: 26,
   },
-  thresholdRangeText: {
-    fontSize: 18,
-    fontWeight: '600',
-    color: '#1A2B3C',
-    minWidth: 80,
-    textAlign: 'center',
+  thresholdTrack: {
+    flex: 1,
+    height: 8,
+    backgroundColor: THEME.border,
+    borderRadius: 4,
+    marginHorizontal: 14,
+    overflow: 'hidden',
+  },
+  thresholdFill: {
+    height: '100%',
+    borderRadius: 4,
+  },
+  divider: {
+    height: 1,
+    backgroundColor: THEME.border,
+    marginVertical: 18,
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
@@ -1829,43 +2483,143 @@ const styles = StyleSheet.create({
   updateModal: {
     width: '100%',
     maxWidth: 320,
-    backgroundColor: '#fff',
-    borderRadius: 20,
-    padding: 24,
+    backgroundColor: THEME.card,
+    borderRadius: 24,
+    padding: 26,
     alignItems: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.2,
-    shadowRadius: 16,
-    elevation: 8,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.25,
+    shadowRadius: 20,
+    elevation: 10,
+  },
+  updateIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 22,
+    backgroundColor: `${THEME.primary}15`,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 14,
   },
   updateModalTitle: {
     fontSize: 18,
-    fontWeight: '700',
-    color: '#1A2B3C',
-    marginBottom: 8,
+    fontWeight: '800',
+    color: THEME.text,
+    marginBottom: 6,
   },
   updateModalStatus: {
-    fontSize: 14,
-    color: '#7A8B9C',
-    marginBottom: 16,
+    fontSize: 13,
+    color: THEME.textSecondary,
+    marginBottom: 18,
   },
   progressTrack: {
     width: '100%',
     height: 10,
-    backgroundColor: '#E8EDF2',
+    backgroundColor: THEME.border,
     borderRadius: 5,
     overflow: 'hidden',
     marginBottom: 12,
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#4ECDC4',
+    backgroundColor: THEME.primary,
     borderRadius: 5,
   },
   updateModalPercent: {
     fontSize: 16,
+    fontWeight: '800',
+    color: THEME.primary,
+  },
+  heroTitleBlock: {
+    flex: 1,
+    marginLeft: 14,
+  },
+  updateBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: THEME.danger,
+    borderRadius: 12,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    shadowColor: THEME.danger,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  updateBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+    marginLeft: 4,
+  },
+  volumeHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  volumeRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 8,
+  },
+  volumeState: {
+    fontSize: 12,
+    marginTop: 6,
     fontWeight: '700',
-    color: '#4ECDC4',
+  },
+  emptyIconCircle: {
+    width: 96,
+    height: 96,
+    borderRadius: 32,
+    backgroundColor: `${THEME.primary}12`,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 18,
+  },
+  detailIconCircle: {
+    width: 52,
+    height: 52,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+  },
+  detailSubTime: {
+    fontSize: 13,
+    color: THEME.textSecondary,
+    marginTop: 2,
+  },
+  timeline: {
+    marginTop: 4,
+  },
+  eventBody: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  versionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    marginBottom: 12,
+  },
+  newVersionBadge: {
+    backgroundColor: `${THEME.danger}15`,
+    borderRadius: 10,
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+  },
+  newVersionBadgeText: {
+    color: THEME.danger,
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
