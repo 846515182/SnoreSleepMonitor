@@ -2293,13 +2293,13 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   statCard: {
-    width: (SCREEN_W - 64) / 2,
+    width: '48.5%',
     backgroundColor: THEME.background,
     borderRadius: 18,
     paddingVertical: 14,
     paddingHorizontal: 12,
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 12,
   },
   statIconCircle: {
     width: 40,
