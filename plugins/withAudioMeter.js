@@ -566,7 +566,6 @@ const AUDIO_METER_FOREGROUND_SERVICE_KT = [
   `            .setContentText("正在后台录制环境音并分析鼾声")`,
   `            .setSmallIcon(android.R.drawable.ic_btn_speak_now)`,
   `            .setOngoing(true)`,
-  `            .setSilent(true)`,
   `            .setPriority(NotificationCompat.PRIORITY_LOW)`,
   `            .build()`,
   `    }`,
@@ -639,9 +638,18 @@ function withAudioMeter(config) {
       const buildGradle = path.join(root, 'app/build.gradle');
       if (fs.existsSync(buildGradle)) {
         let contents = fs.readFileSync(buildGradle, 'utf8');
-        const dep = 'implementation("org.tensorflow:tensorflow-lite:2.16.1")';
-        if (!contents.includes('tensorflow-lite')) {
-          contents = contents.replace(/dependencies\s*\{/, `dependencies {\n    ${dep}`);
+        const deps = [
+          { spec: 'implementation("org.tensorflow:tensorflow-lite:2.16.1")', check: 'tensorflow-lite' },
+          { spec: 'implementation("androidx.core:core:1.12.0")', check: 'androidx.core:core' },
+        ];
+        let changed = false;
+        for (const { spec, check } of deps) {
+          if (!contents.includes(check)) {
+            contents = contents.replace(/dependencies\s*\{/, `dependencies {\n    ${spec}`);
+            changed = true;
+          }
+        }
+        if (changed) {
           fs.writeFileSync(buildGradle, contents);
         }
       }
