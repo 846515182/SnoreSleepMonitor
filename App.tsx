@@ -353,6 +353,15 @@ export default function App() {
     }
   };
 
+  const openBatterySettings = async () => {
+    if (Platform.OS !== 'android') return;
+    try {
+      await IntentLauncher.startActivityAsync('android.settings.IGNORE_BATTERY_OPTIMIZATION_SETTINGS');
+    } catch {
+      Linking.openSettings();
+    }
+  };
+
   const cancelDownload = async () => {
     try {
       if (downloadResumableRef.current) {
@@ -532,10 +541,11 @@ export default function App() {
       console.warn('下载或安装失败', e);
       if (interactive) {
         Alert.alert(
-          '更新失败',
-          `${String(e)}\n\n可能原因：\n1. 未开启"允许安装未知应用"权限\n2. 下载链接无法访问\n3. 存储空间不足\n\n建议先开启安装未知应用权限后再试。`,
+          '安装权限未开启',
+          '系统需要“允许安装未知应用”权限才能自动安装更新。请前往设置开启后，再次点击“立即更新”。',
           [
             { text: '取消', style: 'cancel' },
+            { text: '重试', onPress: () => downloadAndInstallApk(url, interactive) },
             {
               text: '去开启',
               onPress: async () => {
@@ -552,7 +562,6 @@ export default function App() {
                 }
               },
             },
-            { text: '浏览器下载', onPress: () => openUpdateUrl(url) },
           ]
         );
       }
@@ -1996,6 +2005,27 @@ export default function App() {
             <Text style={styles.mainButtonText}>
               {updateCheckState === 'checking' ? '检查中…' : '检查更新'}
             </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.danger}20` }]}>
+              <Ionicons name="battery-charging-outline" size={20} color={THEME.danger} />
+            </View>
+            <Text style={styles.sectionTitle}>后台运行</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            为保证息屏后仍能持续录音和分析，建议将本应用设为“无电池优化”或“允许后台运行”。部分品牌手机（小米 / 华为 / OPPO / vivo）还需在“应用管理 - 省电策略”中手动关闭限制。
+          </Text>
+          <TouchableOpacity
+            style={[styles.mainButton, { backgroundColor: THEME.danger }]}
+            onPress={openBatterySettings}
+          >
+            <Ionicons name="shield-checkmark-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
+            <Text style={styles.mainButtonText}>去设置后台权限</Text>
           </TouchableOpacity>
         </View>
       </View>
