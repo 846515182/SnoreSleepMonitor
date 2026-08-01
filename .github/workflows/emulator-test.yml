@@ -63,7 +63,24 @@ jobs:
           #!/bin/bash
           set -e
           adb wait-for-device
-          adb install -t apk/app-debug.apk
+          # sys.boot_completed=1 之后系统服务（PackageManager 等）仍可能在初始化，
+          # 轮询等待 pm 可用，避免 "Can't find service: package" 竞态失败。
+          echo "Waiting for PackageManager service..."
+          for i in $(seq 1 36); do
+            if adb shell pm path android >/dev/null 2>&1; then
+              echo "PackageManager ready after ~$((i*5))s"
+              break
+            fi
+            sleep 5
+          done
+          # 安装同样带重试，应对偶发的 adb Broken pipe
+          for i in 1 2 3; do
+            if adb install -t apk/app-debug.apk; then
+              break
+            fi
+            echo "adb install attempt $i failed, retrying..."
+            sleep 10
+          done
           adb shell pm grant com.snoresleep.monitor android.permission.RECORD_AUDIO
           adb shell am start -n com.snoresleep.monitor/.MainActivity
           sleep 15
