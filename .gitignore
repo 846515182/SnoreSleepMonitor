@@ -48,3 +48,11 @@ emulator-test-output/
 emulator-test-output-v2/
 app-debug-artifact.zip
 poll-emulator.js
+
+# local android sdk (never commit)
+android-sdk/
+
+# signing keystore binary (only the .b64 is committed)
+release.keystore
+*.keystore
+!*.keystore.b64

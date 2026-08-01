@@ -55,13 +55,14 @@ interface SleepSession {
   recordingUri?: string;
   qualityScore: number; // 0-100
   apneaRisk?: 'low' | 'moderate' | 'high'; // 呼吸暂停筛查风险
+  eventsTruncated?: boolean; // 事件数超上限被截断
   intensityBreakdown?: { mild: number; moderate: number; severe: number }; // 鼾声强度分布
 }
 
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.1.7';
+const CURRENT_VERSION = '1.2.0';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -71,16 +72,24 @@ const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
 const DEFAULT_SNORE_CONFIDENCE = 0.45; // 默认鼾声置信度阈值（YAMNet 更准，可适当放宽）
 const DEFAULT_GRIND_CONFIDENCE = 0.25; // 默认磨牙置信度阈值（YAMNet 聚合分数）
 const DEFAULT_TALK_CONFIDENCE = 0.5; // 默认梦话置信度阈值
-const DEFAULT_APNEA_CONFIDENCE = 0.45; // 默认呼吸暂停（Gasp 等）置信度阈值
+const DEFAULT_APNEA_CONFIDENCE = 0.1; // 默认呼吸暂停判定：连续无声 10 秒（滑块 0.1–0.9 映射 10–30 秒）
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
 const MIN_SNORE_MS = 500; // 最小打鼾持续时间 0.5 秒
 const MIN_GRIND_MS = 300; // 最小磨牙持续时间 0.3 秒
 const MAX_GRIND_MS = 1500; // 磨牙事件一般不超过 1.5 秒
 const MIN_TALK_MS = 500; // 最小梦话持续时间 0.5 秒
-const MIN_APNEA_MS = 200; // 最小呼吸暂停事件 0.2 秒
-const MAX_APNEA_MS = 2000; // 呼吸暂停事件一般不超过 2 秒
 const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
-const MAX_RECORDING_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 保留 7 天录音
+const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WAV 约 115MB/小时，避免撑爆存储）
+const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
+const MAX_PERSISTED_SESSIONS = 200; // 历史记录持久化条数上限
+const APNEA_SOUND_CONF = 0.45; // YAMNet 异常呼吸音（喘息/喘鸣/喷气）置信度，用于确认一次暂停结束
+const MIN_FREE_STORAGE_BYTES = 1500 * 1024 * 1024; // 开始监测前的剩余空间预警线（整晚 WAV 约 1GB）
+
+// 将设置页的 0.1–0.9 滑块映射为 10–30 秒的「连续无声」判定阈值（医学定义呼吸暂停 ≥10 秒）
+function apneaMinSilenceMs(v: number): number {
+  const clamped = Math.max(0.1, Math.min(0.9, v));
+  return Math.round(10 + ((clamped - 0.1) / 0.8) * 20) * 1000;
+}
 const MAX_CACHED_APKS = 3; // 最多保留几个更新包
 
 // 主题色与设计 token
@@ -258,8 +267,10 @@ export default function App() {
   const currentSnoreFramesRef = useRef<number>(0);
   const currentGrindFramesRef = useRef<number>(0);
   const currentTalkFramesRef = useRef<number>(0);
-  const currentApneaFramesRef = useRef<number>(0);
   const currentTotalFramesRef = useRef<number>(0);
+  const silenceStartRef = useRef<number | null>(null); // 连续无声起始点（会话相对毫秒），用于呼吸暂停检测
+  const eventsTruncatedRef = useRef<boolean>(false);
+  const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
   const currentMaxSnoreConfRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
@@ -474,6 +485,8 @@ export default function App() {
     setIsDownloading(true);
     setDownloadProgress(0);
     setDownloadStatus('准备下载…');
+    // 记录失败阶段：下载/校验失败与安装权限失败要给出不同提示
+    let stage: 'download' | 'verify' | 'install' = 'download';
 
     try {
       const fileName = `update_${Date.now()}.apk`;
@@ -505,6 +518,7 @@ export default function App() {
       if (!result) {
         throw new Error('下载失败，请检查网络');
       }
+      stage = 'verify';
 
       // 校验：APK 文件至少大于 1MB，且大小与 GitHub 声明一致（允许 ±1% 误差）
       const fileInfo = await FileSystem.getInfoAsync(result.uri);
@@ -526,6 +540,7 @@ export default function App() {
       await cleanUpdateCache(fileName);
 
       // 获取 content:// URI 并启动安装界面
+      stage = 'install';
       const contentUri = await FileSystem.getContentUriAsync(result.uri);
       await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
         data: contentUri,
@@ -540,6 +555,18 @@ export default function App() {
       setDownloadProgress(0);
       console.warn('下载或安装失败', e);
       if (interactive) {
+        if (stage !== 'install') {
+          // 下载或校验阶段失败：与安装权限无关，展示真实原因
+          Alert.alert(
+            '更新失败',
+            `原因：${e instanceof Error ? e.message : String(e)}`,
+            [
+              { text: '取消', style: 'cancel' },
+              { text: '重试', onPress: () => downloadAndInstallApk(url, interactive) },
+            ]
+          );
+          return;
+        }
         Alert.alert(
           '安装权限未开启',
           '系统需要“允许安装未知应用”权限才能自动安装更新。请前往设置开启后，再次点击“立即更新”。',
@@ -584,6 +611,7 @@ export default function App() {
           qualityScore: s.qualityScore ?? 100,
           apneaRisk: s.apneaRisk ?? 'low',
           intensityBreakdown: s.intensityBreakdown ?? { mild: 0, moderate: 0, severe: 0 },
+          eventsTruncated: s.eventsTruncated ?? false,
           events: (s.events || []).map((e) => ({
             ...e,
             type: e.type || 'snore',
@@ -672,6 +700,16 @@ export default function App() {
       Alert.alert('需要麦克风权限', '请在系统设置中允许本应用使用麦克风，否则无法录音。');
       setIsBusy(false);
       return;
+    }
+
+    // 存储空间预检：整晚 WAV 录音约 115MB/小时
+    try {
+      const freeBytes = await FileSystem.getFreeDiskStorageAsync();
+      if (freeBytes < MIN_FREE_STORAGE_BYTES) {
+        Alert.alert('存储空间不足', '剩余空间不足 1.5GB，可能无法保存整晚录音，请先在设置页清理缓存。');
+      }
+    } catch {
+      // 预检失败不影响启动
     }
 
     try {
@@ -776,11 +814,13 @@ export default function App() {
       currentSnoreFramesRef.current = 0;
       currentGrindFramesRef.current = 0;
       currentTalkFramesRef.current = 0;
-      currentApneaFramesRef.current = 0;
       currentTotalFramesRef.current = 0;
       currentMaxSnoreConfRef.current = 0;
       lastLoudTimeRef.current = 0;
       maxVolumeDbRef.current = -100;
+      silenceStartRef.current = null;
+      eventsTruncatedRef.current = false;
+      lastWindowIdRef.current = -1;
       setMaxVolumeDb(-100);
 
       // 用递归 setTimeout 替代 setInterval，避免 async monitorLoop 调用重叠
@@ -822,6 +862,7 @@ export default function App() {
         const aConf = confs.apnea ?? 0;
         const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
         const tConfAll = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
+        const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
         setVolumeDb(metering);
         setSnoreConfidence(sConf);
         setGrindConfidence(gConf);
@@ -839,14 +880,21 @@ export default function App() {
         const sessionElapsed = now - startTimeRef.current;
         setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-        // 帧级分类：打鼾/梦话/呼吸暂停仍要求是该帧 top 类别；
-        // 磨牙放宽为只要置信度超过阈值且高于其它三种事件即可（不必胜过噪音），
+        // YAMNet 推理窗口 0.975s、轮询 300ms：同一推理结果只计一帧，避免帧统计失真。
+        if (windowId === lastWindowIdRef.current) {
+          return;
+        }
+        lastWindowIdRef.current = windowId;
+
+        // 帧级分类：打鼾/梦话仍要求是该帧 top 类别；
+        // 磨牙放宽为只要置信度超过阈值且高于其它两类事件即可（不必胜过噪音），
         // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
         const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
-        const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf && gConf >= aConf;
+        const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf;
         const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
-        const isApneaFrame = tClass === 'apnea' && aConf >= apneaThreshold;
-        const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
+        const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
+        // 异常呼吸音（喘息/喘鸣/喷气）不再单独计为事件，但可用来确认一次暂停的结束。
+        const isApneaSound = aConf >= APNEA_SOUND_CONF;
 
         if (isSnoreFrame) {
           setSnoreIntensity(classifyIntensity(sConf));
@@ -854,7 +902,8 @@ export default function App() {
           setSnoreIntensity(null);
         }
         setIsSnoringNow(isLoud);
-        detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, isApneaFrame, sessionElapsed, sConf);
+        trackSilence(isLoud || isApneaSound, sessionElapsed);
+        detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, sessionElapsed, sConf);
       } catch (e) {
         console.warn('原生监测循环异常', e);
       }
@@ -884,19 +933,48 @@ export default function App() {
     // Fallback path has no TFLite model, so all loud events are treated as snores.
     const isLoud = metering >= FALLBACK_THRESHOLD_DB;
     setIsSnoringNow(isLoud);
-    detectEvent(isLoud, false, false, false, sessionElapsed, 0);
+    trackSilence(isLoud, sessionElapsed);
+    detectEvent(isLoud, false, false, sessionElapsed, 0);
   };
 
-  // 事件检测：按帧标记为鼾声/磨牙/梦话/呼吸暂停，事件结束时根据帧比例与持续时间分类。
+  // 呼吸暂停检测：医学上暂停指气流停止 ≥10 秒（表现为「没有声音」）。
+  // 连续无声超过设定时长、随后声音（鼾声/异常呼吸音）恢复时，记为一次疑似呼吸暂停，
+  // 事件跨度为无声区间。粗略筛查，不构成医疗诊断。
+  const trackSilence = (isSound: boolean, sessionElapsed: number) => {
+    if (isSound) {
+      const silenceStart = silenceStartRef.current;
+      if (silenceStart !== null) {
+        silenceStartRef.current = null;
+        const silenceDuration = sessionElapsed - silenceStart;
+        if (silenceDuration >= apneaMinSilenceMs(apneaThreshold)) {
+          if (eventsRef.current.length < MAX_EVENTS_PER_SESSION) {
+            eventsRef.current.push({
+              start: silenceStart,
+              end: sessionElapsed,
+              duration: silenceDuration,
+              type: 'apnea',
+            });
+            setApneaCount((c) => c + 1);
+          } else {
+            eventsTruncatedRef.current = true;
+          }
+        }
+      }
+    } else if (silenceStartRef.current === null) {
+      silenceStartRef.current = sessionElapsed;
+    }
+  };
+
+  // 事件检测：按帧标记为鼾声/磨牙/梦话，事件结束时根据帧比例与持续时间分类。
+  // （呼吸暂停改由 trackSilence 基于连续无声区间检测，不再走声音事件帧。）
   const detectEvent = (
     isSnoreFrame: boolean,
     isGrindFrame: boolean,
     isTalkFrame: boolean,
-    isApneaFrame: boolean,
     sessionElapsed: number,
     snoreConf: number
   ) => {
-    const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
+    const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
 
     if (isLoud) {
       lastLoudTimeRef.current = sessionElapsed;
@@ -910,7 +988,6 @@ export default function App() {
         currentSnoreFramesRef.current = isSnoreFrame ? 1 : 0;
         currentGrindFramesRef.current = isGrindFrame ? 1 : 0;
         currentTalkFramesRef.current = isTalkFrame ? 1 : 0;
-        currentApneaFramesRef.current = isApneaFrame ? 1 : 0;
         currentTotalFramesRef.current = 1;
         currentMaxSnoreConfRef.current = isSnoreFrame ? snoreConf : 0;
       } else {
@@ -925,7 +1002,6 @@ export default function App() {
         }
         if (isGrindFrame) currentGrindFramesRef.current += 1;
         if (isTalkFrame) currentTalkFramesRef.current += 1;
-        if (isApneaFrame) currentApneaFramesRef.current += 1;
       }
     } else {
       // 静音时，只有超过宽限期才结束当前事件
@@ -935,7 +1011,9 @@ export default function App() {
       }
     }
 
-    const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
+    const finished = eventsRef.current
+      .filter((e) => e.type !== 'apnea')
+      .reduce((sum, e) => sum + e.duration, 0);
     const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
     setTotalNoiseSeconds(Math.floor((finished + ongoing) / 1000));
 
@@ -957,7 +1035,6 @@ export default function App() {
     const snoreRatio = total > 0 ? currentSnoreFramesRef.current / total : 0;
     const grindRatio = total > 0 ? currentGrindFramesRef.current / total : 0;
     const talkRatio = total > 0 ? currentTalkFramesRef.current / total : 0;
-    const apneaRatio = total > 0 ? currentApneaFramesRef.current / total : 0;
 
     let type: SoundEvent['type'] = 'snore';
     let valid = false;
@@ -966,9 +1043,6 @@ export default function App() {
       type = 'snore';
       valid = true;
       evt.intensity = classifyIntensity(currentMaxSnoreConfRef.current);
-    } else if (apneaRatio >= 0.5 && duration >= MIN_APNEA_MS && duration <= MAX_APNEA_MS) {
-      type = 'apnea';
-      valid = true;
     } else if (talkRatio >= 0.5 && duration >= MIN_TALK_MS) {
       type = 'talk';
       valid = true;
@@ -978,19 +1052,21 @@ export default function App() {
     }
 
     if (valid) {
-      evt.type = type;
-      eventsRef.current.push({ ...evt });
-      if (type === 'snore') setSnoreCount((c) => c + 1);
-      else if (type === 'grind') setGrindCount((c) => c + 1);
-      else if (type === 'talk') setTalkCount((c) => c + 1);
-      else if (type === 'apnea') setApneaCount((c) => c + 1);
+      if (eventsRef.current.length < MAX_EVENTS_PER_SESSION) {
+        evt.type = type;
+        eventsRef.current.push({ ...evt });
+        if (type === 'snore') setSnoreCount((c) => c + 1);
+        else if (type === 'grind') setGrindCount((c) => c + 1);
+        else if (type === 'talk') setTalkCount((c) => c + 1);
+      } else {
+        eventsTruncatedRef.current = true;
+      }
     }
 
     currentEventRef.current = null;
     currentSnoreFramesRef.current = 0;
     currentGrindFramesRef.current = 0;
     currentTalkFramesRef.current = 0;
-    currentApneaFramesRef.current = 0;
     currentTotalFramesRef.current = 0;
     currentMaxSnoreConfRef.current = 0;
   };
@@ -1042,7 +1118,8 @@ export default function App() {
       const totalGrindMs = grindEvents.reduce((sum, e) => sum + e.duration, 0);
       const totalTalkMs = talkEvents.reduce((sum, e) => sum + e.duration, 0);
       const totalApneaMs = apneaEvents.reduce((sum, e) => sum + e.duration, 0);
-      const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs + totalTalkMs + totalApneaMs) / 1000);
+      // 声音时长与质量分不含呼吸暂停（暂停是无声区间，不是噪音）
+      const totalNoiseSec = Math.floor((totalSnoreMs + totalGrindMs + totalTalkMs) / 1000);
 
       // 鼾声强度分布
       const intensityBreakdown = {
@@ -1051,7 +1128,7 @@ export default function App() {
         severe: snoreEvents.filter((e) => e.intensity === 'severe').length,
       };
 
-      // 呼吸暂停风险指数（AHI 简化版：事件数 / 睡眠小时数）
+      // 呼吸暂停风险指数（AHI 简化版：疑似暂停事件数 / 睡眠小时数，仅供筛查参考）
       const hours = durationSeconds / 3600;
       const ahi = hours > 0 ? apneaEvents.length / hours : 0;
       let apneaRisk: SleepSession['apneaRisk'] = 'low';
@@ -1076,6 +1153,7 @@ export default function App() {
         qualityScore: calculateQualityScore(durationSeconds, totalNoiseSec),
         apneaRisk,
         intensityBreakdown,
+        eventsTruncated: eventsTruncatedRef.current,
       };
 
       setSessions((prev) => [session, ...prev]);
@@ -1200,7 +1278,7 @@ export default function App() {
       isInitialSessionsRef.current = false;
       return;
     }
-    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sessions)).catch((e) => {
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(sessions.slice(0, MAX_PERSISTED_SESSIONS))).catch((e) => {
       console.warn('保存历史记录失败', e);
     });
   }, [sessions]);
@@ -1363,7 +1441,7 @@ export default function App() {
                 <Text style={[styles.confidenceValue, { color: THEME.talk }]}>{(talkConfidence * 100).toFixed(0)}%</Text>
               </View>
               <View style={[styles.confidenceChip, { backgroundColor: `${THEME.apnea}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: THEME.apnea }]}>暂停</Text>
+                <Text style={[styles.confidenceLabel, { color: THEME.apnea }]}>异常呼吸</Text>
                 <Text style={[styles.confidenceValue, { color: THEME.apnea }]}>{(apneaConfidence * 100).toFixed(0)}%</Text>
               </View>
             </View>
@@ -1625,6 +1703,10 @@ export default function App() {
             <Text style={styles.qualityTextLarge}>呼吸暂停风险 {getApneaRiskLabel(selectedSession.apneaRisk || 'low')}</Text>
           </View>
 
+          <Text style={styles.disclaimerText}>
+            呼吸暂停筛查基于连续无声时长估算，仅供参考，不构成医疗诊断；如有疑虑请就医进行专业睡眠监测（多导睡眠图）。
+          </Text>
+
           {selectedSession.intensityBreakdown && selectedSession.snoreCount > 0 && (
             <View style={{ marginBottom: 24 }}>
               <Text style={styles.sectionTitle}>
@@ -1691,6 +1773,9 @@ export default function App() {
           <Text style={styles.sectionTitle}>
             <Ionicons name="list-outline" size={16} color={THEME.text} /> 异常声音事件
           </Text>
+          {selectedSession.eventsTruncated && (
+            <Text style={styles.disclaimerText}>当晚事件过多，仅保留前 {MAX_EVENTS_PER_SESSION} 条。</Text>
+          )}
           {selectedSession.events.length === 0 ? (
             <View style={styles.emptyEventBox}>
               <View style={[styles.eventIconCircle, { backgroundColor: `${THEME.success}15` }]}>
@@ -1914,12 +1999,12 @@ export default function App() {
             <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.apnea}20` }]}>
               <Ionicons name="pulse-outline" size={20} color={THEME.apnea} />
             </View>
-            <Text style={styles.sectionTitle}>呼吸暂停检测阈值</Text>
+            <Text style={styles.sectionTitle}>呼吸暂停判定（连续无声时长）</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            当“喘息 / 喘气 / 喷气”等异常呼吸类聚合置信度不低于该阈值，且事件持续 0.2–2.0 秒，才会被记录为一次呼吸暂停候选。推荐 40%–55%。
+            医学上呼吸暂停指气流停止 ≥10 秒（表现为“没有声音”）。当连续无声超过该时长、随后鼾声或喘息声恢复时，记为一次疑似呼吸暂停。调节范围 10–30 秒，推荐 10–15 秒。结果仅供筛查参考，不构成医疗诊断。
           </Text>
-          <Text style={styles.thresholdValue}>{(apneaThreshold * 100).toFixed(0)}%</Text>
+          <Text style={styles.thresholdValue}>{(apneaMinSilenceMs(apneaThreshold) / 1000).toFixed(0)}秒</Text>
           <View style={styles.sliderRow}>
             <TouchableOpacity
               style={[styles.adjustButton, { backgroundColor: `${THEME.apnea}20` }]}
@@ -2171,7 +2256,7 @@ function getClassLabel(classKey: string): string {
     case 'snoring': return '打鼾';
     case 'grinding': return '磨牙';
     case 'talking': return '梦话';
-    case 'apnea': return '呼吸暂停';
+    case 'apnea': return '异常呼吸音';
     case 'noise': return '环境音';
     default: return classKey;
   }
@@ -2717,6 +2802,12 @@ const styles = StyleSheet.create({
     color: THEME.textSecondary,
     fontSize: 13,
     marginTop: 8,
+  },
+  disclaimerText: {
+    color: THEME.textTertiary,
+    fontSize: 12,
+    lineHeight: 17,
+    marginBottom: 14,
   },
   eventRow: {
     flexDirection: 'row',

@@ -33,6 +33,11 @@ jobs:
       - name: Prebuild Android
         run: npx expo prebuild --platform android --clean
 
+      - name: Bundle JS into APK
+        run: |
+          mkdir -p android/app/src/main/assets
+          npx react-native bundle --platform android --dev false --entry-file index.ts --bundle-output android/app/src/main/assets/index.android.bundle --assets-dest android/app/src/main/res/
+
       - name: Build universal debug APK
         run: cd android && ./gradlew :app:assembleDebug --no-daemon
 
@@ -68,8 +73,15 @@ jobs:
             exit 1
           fi
           echo "App is running, PID=$PID"
-          touch logcat.txt
-          adb logcat -d -s AudioMeter:D > logcat.txt || true
+          adb logcat -d > logcat.txt || touch logcat.txt
+          # Red-screen / JS bundle failure detection: a debug APK without Metro
+          # must have loaded the embedded bundle; these signatures mean it did not.
+          if grep -qE "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION" logcat.txt; then
+            echo "ERROR: JS bundle failed to load (red screen signatures found in logcat)"
+            grep -E "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION" logcat.txt | head -20
+            exit 1
+          fi
+          echo "JS bundle loaded OK"
           adb shell screencap -p /sdcard/screen.png || true
           adb pull /sdcard/screen.png screen.png || touch screen.png
           EOF

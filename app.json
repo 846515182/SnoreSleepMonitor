@@ -2,7 +2,7 @@
   "expo": {
     "name": "SnoreSleepMonitor",
     "slug": "SnoreSleepMonitor",
-    "version": "1.1.7",
+    "version": "1.2.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.snoresleep.monitor",
-      "versionCode": 8,
+      "versionCode": 9,
       "adaptiveIcon": {
         "backgroundColor": "#F5F7FA",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -29,8 +29,7 @@
         "android.permission.WAKE_LOCK",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_MICROPHONE",
-        "android.permission.REQUEST_INSTALL_PACKAGES",
-        "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        "android.permission.REQUEST_INSTALL_PACKAGES"
       ]
     },
     "web": {
