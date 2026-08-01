@@ -105,11 +105,13 @@ jobs:
           fi
           echo "App is running, PID=$PID"
           adb logcat -d > logcat.txt || touch logcat.txt
-          # Red-screen / JS bundle failure detection: a debug APK without Metro
-          # must have loaded the embedded bundle; these signatures mean it did not.
-          if grep -qE "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION" logcat.txt; then
-            echo "ERROR: JS bundle failed to load (red screen signatures found in logcat)"
-            grep -E "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION" logcat.txt | head -20
+          # 红屏检测只针对本应用相关日志（ReactNativeJS 标签 / 应用包名）。
+          # 不能全量 grep FATAL EXCEPTION——资源紧张的模拟器里系统服务也会崩溃，
+          # 那些行与应用无关，会造成误报。
+          APPLOG=$(grep -E "ReactNativeJS|com\\.snoresleep\\.monitor" logcat.txt || true)
+          if echo "$APPLOG" | grep -qE "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION"; then
+            echo "ERROR: JS bundle failed to load (red screen signatures found in app logcat)"
+            echo "$APPLOG" | grep -E "Unable to load script|Could not get BatchedBridge|FATAL EXCEPTION" | head -20
             exit 1
           fi
           echo "JS bundle loaded OK"
