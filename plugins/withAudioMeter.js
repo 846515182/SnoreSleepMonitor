@@ -1,4 +1,4 @@
-const { withDangerousMod, withMainApplication } = require('@expo/config-plugins');
+const { withDangerousMod, withMainApplication, withAndroidManifest } = require('@expo/config-plugins');
 const fs = require('fs');
 const path = require('path');
 
@@ -6,10 +6,12 @@ const AUDIO_METER_MODULE_KT = [
   `package com.snoresleep.monitor`,
   ``,
   `import android.Manifest`,
+  `import android.content.Intent`,
   `import android.content.pm.PackageManager`,
   `import android.media.AudioFormat`,
   `import android.media.AudioRecord`,
   `import android.media.MediaRecorder`,
+  `import android.os.Build`,
   `import android.os.Process`,
   `import android.util.Log`,
   `import androidx.core.app.ActivityCompat`,
@@ -59,7 +61,23 @@ const AUDIO_METER_MODULE_KT = [
   `    private var latestIsSnoring = false`,
   `    private var latestAmplitudeDb = -100.0`,
   ``,
+  `    // User-configurable thresholds; kept in sync with JS settings.`,
+  `    private var snoreThreshold = 0.45`,
+  `    private var grindThreshold = 0.25`,
+  `    private var talkThreshold = 0.50`,
+  `    private var apneaThreshold = 0.45`,
+  ``,
   `    override fun getName(): String = "AudioMeter"`,
+  ``,
+  `    @ReactMethod`,
+  `    fun setThresholds(snore: Double, grind: Double, talk: Double, apnea: Double, promise: Promise) {`,
+  `        snoreThreshold = snore.coerceIn(0.0, 1.0)`,
+  `        grindThreshold = grind.coerceIn(0.0, 1.0)`,
+  `        talkThreshold = talk.coerceIn(0.0, 1.0)`,
+  `        apneaThreshold = apnea.coerceIn(0.0, 1.0)`,
+  `        Log.d(TAG, "Thresholds updated: snore=$snoreThreshold grind=$grindThreshold talk=$talkThreshold apnea=$apneaThreshold")`,
+  `        promise.resolve(null)`,
+  `    }`,
   ``,
   `    @ReactMethod`,
   `    fun startRecording(promise: Promise) {`,
@@ -75,10 +93,15 @@ const AUDIO_METER_MODULE_KT = [
   `                throw SecurityException("RECORD_AUDIO permission not granted")`,
   `            }`,
   ``,
-  `            // Load YAMNet class labels from the bundled CSV.`,
-  `            labels = loadLabels()`,
+  `            // Start foreground service so recording continues when the screen is off or app is backgrounded.`,
+  `            startForegroundService()`,
+  ``,
+  `            // Load YAMNet class labels once and cache them.`,
   `            if (labels.isEmpty()) {`,
-  `                labels = (0 until CLASS_COUNT).map { "class_\$it" }`,
+  `                labels = loadLabels()`,
+  `                if (labels.isEmpty()) {`,
+  `                    labels = (0 until CLASS_COUNT).map { "class_\$it" }`,
+  `                }`,
   `            }`,
   ``,
   `            // Copy TFLite model from assets to a regular file and verify integrity by size.`,
@@ -119,6 +142,7 @@ const AUDIO_METER_MODULE_KT = [
   `        } catch (e: Exception) {`,
   `            Log.e(TAG, "startRecording failed", e)`,
   `            releaseResources()`,
+  `            stopForegroundService()`,
   `            promise.reject("START_ERROR", e.message ?: "Unknown error")`,
   `        }`,
   `    }`,
@@ -134,6 +158,7 @@ const AUDIO_METER_MODULE_KT = [
   `        }`,
   `        recordingThread = null`,
   `        releaseResources()`,
+  `        stopForegroundService()`,
   `        promise.resolve("file://\$wavFilePath")`,
   `    }`,
   ``,
@@ -155,6 +180,30 @@ const AUDIO_METER_MODULE_KT = [
   `            map.putDouble("amplitudeDb", latestAmplitudeDb)`,
   `        }`,
   `        promise.resolve(map)`,
+  `    }`,
+  ``,
+  `    private fun startForegroundService() {`,
+  `        try {`,
+  `            val intent = Intent(reactApplicationContext, AudioForegroundService::class.java).apply {`,
+  `                action = AudioForegroundService.ACTION_START`,
+  `            }`,
+  `            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {`,
+  `                reactApplicationContext.startForegroundService(intent)`,
+  `            } else {`,
+  `                reactApplicationContext.startService(intent)`,
+  `            }`,
+  `        } catch (e: Exception) {`,
+  `            Log.w(TAG, "Failed to start foreground service", e)`,
+  `        }`,
+  `    }`,
+  ``,
+  `    private fun stopForegroundService() {`,
+  `        try {`,
+  `            val intent = Intent(reactApplicationContext, AudioForegroundService::class.java)`,
+  `            reactApplicationContext.stopService(intent)`,
+  `        } catch (e: Exception) {`,
+  `            Log.w(TAG, "Failed to stop foreground service", e)`,
+  `        }`,
   `    }`,
   ``,
   `    private fun releaseResources() {`,
@@ -325,7 +374,7 @@ const AUDIO_METER_MODULE_KT = [
   `            val topEntry = confidences.maxByOrNull { it.value }`,
   `            val topClass = topEntry?.key ?: "noise"`,
   `            val topConfidence = topEntry?.value ?: 0.0`,
-  `            val isSnoring = topClass == "snoring" && (confidences["snoring"] ?: 0.0) > 0.4`,
+  `            val isSnoring = topClass == "snoring" && (confidences["snoring"] ?: 0.0) > snoreThreshold`,
   ``,
   `            synchronized(lock) {`,
   `                latestConfidences = confidences`,
@@ -419,14 +468,107 @@ const AUDIO_METER_MODULE_KT = [
   ``,
   `    private fun writeIntLe(out: DataOutputStream, v: Int) {`,
   `        out.write(v and 0xFF)`,
-  `        out.write((v shr 8) and 0xFF)`,
-  `        out.write((v shr 16) and 0xFF)`,
-  `        out.write((v shr 24) and 0xFF)`,
+  `        write((v shr 8) and 0xFF)`,
+  `        write((v shr 16) and 0xFF)`,
+  `        write((v shr 24) and 0xFF)`,
   `    }`,
   ``,
   `    private fun writeShortLe(out: DataOutputStream, v: Int) {`,
   `        out.write(v and 0xFF)`,
   `        out.write((v shr 8) and 0xFF)`,
+  `    }`,
+  `}`,
+  ``,
+].join('\n');
+
+const AUDIO_METER_FOREGROUND_SERVICE_KT = [
+  `package com.snoresleep.monitor`,
+  ``,
+  `import android.app.Notification`,
+  `import android.app.NotificationChannel`,
+  `import android.app.NotificationManager`,
+  `import android.app.Service`,
+  `import android.content.Context`,
+  `import android.content.Intent`,
+  `import android.os.Build`,
+  `import android.os.IBinder`,
+  `import androidx.core.app.NotificationCompat`,
+  ``,
+  `/**`,
+  ` * Foreground service that keeps the microphone recording session alive while the app`,
+  ` * is backgrounded or the screen is turned off.`,
+  ` */`,
+  `class AudioForegroundService : Service() {`,
+  `    companion object {`,
+  `        const val CHANNEL_ID = "snore_sleep_monitor_channel"`,
+  `        const val NOTIFICATION_ID = 1`,
+  `        const val ACTION_START = "com.snoresleep.monitor.action.START_RECORDING"`,
+  `        const val ACTION_STOP = "com.snoresleep.monitor.action.STOP_RECORDING"`,
+  `    }`,
+  ``,
+  `    override fun onCreate() {`,
+  `        super.onCreate()`,
+  `        createNotificationChannel()`,
+  `    }`,
+  ``,
+  `    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {`,
+  `        when (intent?.action) {`,
+  `            ACTION_STOP -> {`,
+  `                stopService()`,
+  `                return START_NOT_STICKY`,
+  `            }`,
+  `            else -> {`,
+  `                val notification = createNotification()`,
+  `                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {`,
+  `                    startForeground(`,
+  `                        NOTIFICATION_ID,`,
+  `                        notification,`,
+  `                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE`,
+  `                    )`,
+  `                } else {`,
+  `                    startForeground(NOTIFICATION_ID, notification)`,
+  `                }`,
+  `            }`,
+  `        }`,
+  `        return START_STICKY`,
+  `    }`,
+  ``,
+  `    override fun onBind(intent: Intent?): IBinder? = null`,
+  ``,
+  `    private fun stopService() {`,
+  `        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {`,
+  `            stopForeground(STOP_FOREGROUND_REMOVE)`,
+  `        } else {`,
+  `            @Suppress("DEPRECATION")`,
+  `            stopForeground(true)`,
+  `        }`,
+  `        stopSelf()`,
+  `    }`,
+  ``,
+  `    private fun createNotificationChannel() {`,
+  `        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {`,
+  `            val channel = NotificationChannel(`,
+  `                CHANNEL_ID,`,
+  `                "睡眠监测",`,
+  `                NotificationManager.IMPORTANCE_LOW`,
+  `            ).apply {`,
+  `                description = "保持鼾声监测在后台运行"`,
+  `                setSound(null, null)`,
+  `            }`,
+  `            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager`,
+  `            manager.createNotificationChannel(channel)`,
+  `        }`,
+  `    }`,
+  ``,
+  `    private fun createNotification(): Notification {`,
+  `        return NotificationCompat.Builder(this, CHANNEL_ID)`,
+  `            .setContentTitle("睡眠监测中")`,
+  `            .setContentText("正在后台录制环境音并分析鼾声")`,
+  `            .setSmallIcon(android.R.drawable.ic_btn_speak_now)`,
+  `            .setOngoing(true)`,
+  `            .setSilent(true)`,
+  `            .setPriority(NotificationCompat.PRIORITY_LOW)`,
+  `            .build()`,
   `    }`,
   `}`,
   ``,
@@ -463,6 +605,7 @@ function withAudioMeter(config) {
       fs.mkdirSync(javaDir, { recursive: true });
       fs.writeFileSync(path.join(javaDir, 'AudioMeterModule.kt'), AUDIO_METER_MODULE_KT);
       fs.writeFileSync(path.join(javaDir, 'AudioMeterPackage.kt'), AUDIO_METER_PACKAGE_KT);
+      fs.writeFileSync(path.join(javaDir, 'AudioForegroundService.kt'), AUDIO_METER_FOREGROUND_SERVICE_KT);
 
       // Copy the YAMNet model and its class map into Android assets.
       const assetsDir = path.join(root, 'app/src/main/assets');
@@ -538,6 +681,34 @@ function withAudioMeter(config) {
       return config;
     }
 
+    return config;
+  });
+
+  // 4. Declare the foreground service in AndroidManifest.xml
+  config = withAndroidManifest(config, (config) => {
+    const manifest = config.modResults.manifest;
+    // expo/config-plugins parses <application> as an array even if there is only one.
+    const application = Array.isArray(manifest.application)
+      ? manifest.application[0]
+      : manifest.application;
+    if (!application) return config;
+
+    if (!application.service) {
+      application.service = [];
+    }
+    const services = Array.isArray(application.service) ? application.service : [application.service];
+
+    if (!services.some((s) => s.$?.['android:name'] === '.AudioForegroundService')) {
+      services.push({
+        $: {
+          'android:name': '.AudioForegroundService',
+          'android:enabled': 'true',
+          'android:exported': 'false',
+          'android:foregroundServiceType': 'microphone',
+        },
+      });
+    }
+    application.service = services;
     return config;
   });
 

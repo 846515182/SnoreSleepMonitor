@@ -167,11 +167,19 @@ async function fetchLatestRelease(): Promise<LatestRelease | null> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     const res = await fetch(GITHUB_RELEASE_API, {
-      headers: { Accept: 'application/vnd.github+json' },
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': `${GITHUB_REPO}/${CURRENT_VERSION}`,
+      },
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 403) {
+        console.warn('GitHub API 频率受限，请稍后再试');
+      }
+      return null;
+    }
     const data = await res.json();
     const apkAsset = (data.assets || []).find((a: any) => a.name?.endsWith('.apk'));
     if (!apkAsset?.browser_download_url) return null;
@@ -207,6 +215,8 @@ export default function App() {
   const [maxVolumeDb, setMaxVolumeDb] = useState(-100);
   const [snoreThreshold, setSnoreThreshold] = useState(DEFAULT_SNORE_CONFIDENCE);
   const [grindThreshold, setGrindThreshold] = useState(DEFAULT_GRIND_CONFIDENCE);
+  const [talkThreshold, setTalkThreshold] = useState(DEFAULT_TALK_CONFIDENCE);
+  const [apneaThreshold, setApneaThreshold] = useState(DEFAULT_APNEA_CONFIDENCE);
   const [snoreConfidence, setSnoreConfidence] = useState(0);
   const [grindConfidence, setGrindConfidence] = useState(0);
   const [talkConfidence, setTalkConfidence] = useState(0);
@@ -224,6 +234,10 @@ export default function App() {
   const [talkCount, setTalkCount] = useState(0);
   const [apneaCount, setApneaCount] = useState(0);
   const [totalNoiseSeconds, setTotalNoiseSeconds] = useState(0);
+  const [snoreSeconds, setSnoreSeconds] = useState(0);
+  const [grindSeconds, setGrindSeconds] = useState(0);
+  const [talkSeconds, setTalkSeconds] = useState(0);
+  const [apneaSeconds, setApneaSeconds] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
   const [playbackDurMs, setPlaybackDurMs] = useState(0); // 录音总时长（毫秒）
@@ -266,6 +280,12 @@ export default function App() {
           }
           if (typeof settings.grindThreshold === 'number' && mounted) {
             setGrindThreshold(Math.max(0.1, Math.min(0.9, settings.grindThreshold)));
+          }
+          if (typeof settings.talkThreshold === 'number' && mounted) {
+            setTalkThreshold(Math.max(0.1, Math.min(0.9, settings.talkThreshold)));
+          }
+          if (typeof settings.apneaThreshold === 'number' && mounted) {
+            setApneaThreshold(Math.max(0.1, Math.min(0.9, settings.apneaThreshold)));
           }
         }
       } catch (e) {
@@ -455,18 +475,6 @@ export default function App() {
       await cleanUpdateCache(fileName);
       await cleanOldRecordings();
 
-      // Android 6.0-9.0 如要写入外部存储才需申请，缓存目录不需要
-      if (Platform.Version && Number(Platform.Version) < 29) {
-        try {
-          const storagePerm = PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE;
-          if (storagePerm) {
-            await PermissionsAndroid.request(storagePerm);
-          }
-        } catch {
-          // 忽略，缓存目录不需要此权限
-        }
-      }
-
       setDownloadStatus(expectedSize ? `正在下载… 0% / ${formatBytes(expectedSize)}` : '正在下载…');
       downloadResumableRef.current = FileSystem.createDownloadResumable(
         url,
@@ -581,11 +589,21 @@ export default function App() {
     }
   };
 
-  const saveSettings = async (nextSnore: number, nextGrind: number) => {
+  const saveSettings = async (
+    nextSnore: number,
+    nextGrind: number,
+    nextTalk: number,
+    nextApnea: number
+  ) => {
     try {
       await AsyncStorage.setItem(
         SETTINGS_KEY,
-        JSON.stringify({ snoreThreshold: nextSnore, grindThreshold: nextGrind })
+        JSON.stringify({
+          snoreThreshold: nextSnore,
+          grindThreshold: nextGrind,
+          talkThreshold: nextTalk,
+          apneaThreshold: nextApnea,
+        })
       );
     } catch (e) {
       console.warn('保存设置失败', e);
@@ -655,6 +673,12 @@ export default function App() {
       let nativeStarted = false;
       if (Platform.OS === 'android' && AudioMeter) {
         try {
+          // 把 JS 设置页里的阈值同步给原生模块，保证两端判定一致
+          try {
+            await AudioMeter.setThresholds(snoreThreshold, grindThreshold, talkThreshold, apneaThreshold);
+          } catch (thresholdErr) {
+            console.warn('同步阈值到原生模块失败', thresholdErr);
+          }
           // 原生模块：用 AudioRecord 录音 + YAMNet 模型实时推理
           const recordingUri = await AudioMeter.startRecording();
           recordingUriRef.current = recordingUri;
@@ -725,6 +749,10 @@ export default function App() {
       setTalkCount(0);
       setApneaCount(0);
       setTotalNoiseSeconds(0);
+      setSnoreSeconds(0);
+      setGrindSeconds(0);
+      setTalkSeconds(0);
+      setApneaSeconds(0);
       setVolumeDb(-100);
       setSnoreConfidence(0);
       setGrindConfidence(0);
@@ -807,8 +835,8 @@ export default function App() {
         // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
         const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
         const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf && gConf >= aConf;
-        const isTalkFrame = tClass === 'talking' && tConf >= DEFAULT_TALK_CONFIDENCE;
-        const isApneaFrame = tClass === 'apnea' && aConf >= DEFAULT_APNEA_CONFIDENCE;
+        const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
+        const isApneaFrame = tClass === 'apnea' && aConf >= apneaThreshold;
         const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame || isApneaFrame;
 
         if (isSnoreFrame) {
@@ -901,6 +929,14 @@ export default function App() {
     const finished = eventsRef.current.reduce((sum, e) => sum + e.duration, 0);
     const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
     setTotalNoiseSeconds(Math.floor((finished + ongoing) / 1000));
+
+    // 按类型累计已结束事件时长（毫秒 -> 秒），进行中事件等 finalize 后再归类，避免类型误判。
+    const typeMs = (type: SoundEvent['type']) =>
+      eventsRef.current.filter((e) => e.type === type).reduce((sum, e) => sum + e.duration, 0);
+    setSnoreSeconds(Math.floor(typeMs('snore') / 1000));
+    setGrindSeconds(Math.floor(typeMs('grind') / 1000));
+    setTalkSeconds(Math.floor(typeMs('talk') / 1000));
+    setApneaSeconds(Math.floor(typeMs('apnea') / 1000));
   };
 
   const finalizeCurrentEvent = () => {
@@ -1054,6 +1090,10 @@ export default function App() {
     setConfidences({});
     setSnoreIntensity(null);
     setIsSnoringNow(false);
+    setSnoreSeconds(0);
+    setGrindSeconds(0);
+    setTalkSeconds(0);
+    setApneaSeconds(0);
     deactivateKeepAwake('monitor').catch(() => {});
   };
 
@@ -1124,12 +1164,14 @@ export default function App() {
     }
   };
 
-  // 应用切到后台时自动保存并停止监测，避免进程被杀导致数据丢失。
+  // 切后台/息屏时不再停止监测：AudioForegroundService 会保持录音存活。
+  // 组件真正卸载时（应用被杀死或页面关闭）再由下方 cleanup effect 收尾。
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       if (nextAppState === 'background' || nextAppState === 'inactive') {
         if (isMonitoring) {
-          stopMonitoring().catch((e) => console.warn('后台停止监测失败', e));
+          // 前台服务会持有麦克风并显示通知，用户回到前台时界面继续刷新即可。
+          console.log('App moved to background while monitoring; foreground service keeps recording.');
         }
       }
     });
@@ -1349,6 +1391,26 @@ export default function App() {
               声音时长：{formatDuration(totalNoiseSeconds)}
             </Text>
           </View>
+
+          {/* 各类事件累计时长 */}
+          <View style={styles.durationRow}>
+            <View style={styles.durationItem}>
+              <View style={[styles.durationDot, { backgroundColor: THEME.snore }]} />
+              <Text style={styles.durationLabel}>鼾声 {formatDuration(snoreSeconds)}</Text>
+            </View>
+            <View style={styles.durationItem}>
+              <View style={[styles.durationDot, { backgroundColor: THEME.grind }]} />
+              <Text style={styles.durationLabel}>磨牙 {formatDuration(grindSeconds)}</Text>
+            </View>
+            <View style={styles.durationItem}>
+              <View style={[styles.durationDot, { backgroundColor: THEME.talk }]} />
+              <Text style={styles.durationLabel}>梦话 {formatDuration(talkSeconds)}</Text>
+            </View>
+            <View style={styles.durationItem}>
+              <View style={[styles.durationDot, { backgroundColor: THEME.apnea }]} />
+              <Text style={styles.durationLabel}>暂停 {formatDuration(apneaSeconds)}</Text>
+            </View>
+          </View>
         </View>
 
         {/* 主按钮 */}
@@ -1382,7 +1444,7 @@ export default function App() {
         {isMonitoring && (
           <View style={styles.tipRow}>
             <Ionicons name="battery-charging" size={13} color={THEME.textTertiary} />
-            <Text style={styles.tipText}>监测中 · 建议连接充电器，保持屏幕常亮</Text>
+            <Text style={styles.tipText}>监测中 · 已启用后台录音，可息屏运行，建议连接充电器</Text>
           </View>
         )}
       </View>
@@ -1720,7 +1782,7 @@ export default function App() {
               onPress={() => {
                 const val = Math.max(0.1, parseFloat((snoreThreshold - 0.05).toFixed(2)));
                 setSnoreThreshold(val);
-                saveSettings(val, grindThreshold);
+                saveSettings(val, grindThreshold, talkThreshold, apneaThreshold);
               }}
             >
               <Text style={[styles.adjustButtonText, { color: THEME.snore }]}>-</Text>
@@ -1738,7 +1800,7 @@ export default function App() {
               onPress={() => {
                 const val = Math.min(0.9, parseFloat((snoreThreshold + 0.05).toFixed(2)));
                 setSnoreThreshold(val);
-                saveSettings(val, grindThreshold);
+                saveSettings(val, grindThreshold, talkThreshold, apneaThreshold);
               }}
             >
               <Text style={[styles.adjustButtonText, { color: THEME.snore }]}>+</Text>
@@ -1765,7 +1827,7 @@ export default function App() {
               onPress={() => {
                 const val = Math.max(0.1, parseFloat((grindThreshold - 0.05).toFixed(2)));
                 setGrindThreshold(val);
-                saveSettings(snoreThreshold, val);
+                saveSettings(snoreThreshold, val, talkThreshold, apneaThreshold);
               }}
             >
               <Text style={[styles.adjustButtonText, { color: THEME.grind }]}>-</Text>
@@ -1783,10 +1845,100 @@ export default function App() {
               onPress={() => {
                 const val = Math.min(0.9, parseFloat((grindThreshold + 0.05).toFixed(2)));
                 setGrindThreshold(val);
-                saveSettings(snoreThreshold, val);
+                saveSettings(snoreThreshold, val, talkThreshold, apneaThreshold);
               }}
             >
               <Text style={[styles.adjustButtonText, { color: THEME.grind }]}>+</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.divider} />
+
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.talk}20` }]}>
+              <Ionicons name="chatbubble-outline" size={20} color={THEME.talk} />
+            </View>
+            <Text style={styles.sectionTitle}>梦话检测阈值</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            当“说话 / 对话 / 低语”等语音类聚合置信度不低于该阈值，且事件持续时间达到最小值，才会被记录为一次梦话。推荐 45%–60%。
+          </Text>
+          <Text style={styles.thresholdValue}>{(talkThreshold * 100).toFixed(0)}%</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.talk}20` }]}
+              onPress={() => {
+                const val = Math.max(0.1, parseFloat((talkThreshold - 0.05).toFixed(2)));
+                setTalkThreshold(val);
+                saveSettings(snoreThreshold, grindThreshold, val, apneaThreshold);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.talk }]}>-</Text>
+            </TouchableOpacity>
+            <View style={styles.thresholdTrack}>
+              <View
+                style={[
+                  styles.thresholdFill,
+                  { width: `${((talkThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: THEME.talk },
+                ]}
+              />
+            </View>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.talk}20` }]}
+              onPress={() => {
+                const val = Math.min(0.9, parseFloat((talkThreshold + 0.05).toFixed(2)));
+                setTalkThreshold(val);
+                saveSettings(snoreThreshold, grindThreshold, val, apneaThreshold);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.talk }]}>+</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.divider} />
+
+        <View style={styles.settingSection}>
+          <View style={styles.settingHeader}>
+            <View style={[styles.settingIconCircle, { backgroundColor: `${THEME.apnea}20` }]}>
+              <Ionicons name="pulse-outline" size={20} color={THEME.apnea} />
+            </View>
+            <Text style={styles.sectionTitle}>呼吸暂停检测阈值</Text>
+          </View>
+          <Text style={styles.settingsDesc}>
+            当“喘息 / 喘气 / 喷气”等异常呼吸类聚合置信度不低于该阈值，且事件持续 0.2–2.0 秒，才会被记录为一次呼吸暂停候选。推荐 40%–55%。
+          </Text>
+          <Text style={styles.thresholdValue}>{(apneaThreshold * 100).toFixed(0)}%</Text>
+          <View style={styles.sliderRow}>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.apnea}20` }]}
+              onPress={() => {
+                const val = Math.max(0.1, parseFloat((apneaThreshold - 0.05).toFixed(2)));
+                setApneaThreshold(val);
+                saveSettings(snoreThreshold, grindThreshold, talkThreshold, val);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.apnea }]}>-</Text>
+            </TouchableOpacity>
+            <View style={styles.thresholdTrack}>
+              <View
+                style={[
+                  styles.thresholdFill,
+                  { width: `${((apneaThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: THEME.apnea },
+                ]}
+              />
+            </View>
+            <TouchableOpacity
+              style={[styles.adjustButton, { backgroundColor: `${THEME.apnea}20` }]}
+              onPress={() => {
+                const val = Math.min(0.9, parseFloat((apneaThreshold + 0.05).toFixed(2)));
+                setApneaThreshold(val);
+                saveSettings(snoreThreshold, grindThreshold, talkThreshold, val);
+              }}
+            >
+              <Text style={[styles.adjustButtonText, { color: THEME.apnea }]}>+</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1796,7 +1948,9 @@ export default function App() {
           onPress={() => {
             setSnoreThreshold(DEFAULT_SNORE_CONFIDENCE);
             setGrindThreshold(DEFAULT_GRIND_CONFIDENCE);
-            saveSettings(DEFAULT_SNORE_CONFIDENCE, DEFAULT_GRIND_CONFIDENCE);
+            setTalkThreshold(DEFAULT_TALK_CONFIDENCE);
+            setApneaThreshold(DEFAULT_APNEA_CONFIDENCE);
+            saveSettings(DEFAULT_SNORE_CONFIDENCE, DEFAULT_GRIND_CONFIDENCE, DEFAULT_TALK_CONFIDENCE, DEFAULT_APNEA_CONFIDENCE);
           }}
         >
           <Ionicons name="refresh-outline" size={18} color="#fff" style={{ marginRight: 8 }} />
@@ -2070,7 +2224,6 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   warningText: {
-    flex: 1,
     color: '#E65100',
     fontSize: 13,
     lineHeight: 18,
@@ -2252,6 +2405,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: 10,
   },
+  durationRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 10,
+    gap: 8,
+  },
+  durationItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  durationDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 4,
+  },
+  durationLabel: {
+    fontSize: 11,
+    color: THEME.textSecondary,
+  },
   intensityBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2429,6 +2602,7 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   detailTime: {
+    flex: 1,
     fontSize: 18,
     fontWeight: '800',
     color: THEME.text,
