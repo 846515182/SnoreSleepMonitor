@@ -73,14 +73,28 @@ jobs:
             fi
             sleep 5
           done
-          # 安装同样带重试，应对偶发的 adb Broken pipe
-          for i in 1 2 3; do
+          # 安装带重试：system_server 在资源紧张的 runner 上可能反复崩溃，
+          # 每次重试前重新确认 pm 服务可用，最多 8 次。
+          INSTALLED=0
+          for i in $(seq 1 8); do
+            if ! adb shell pm path android >/dev/null 2>&1; then
+              echo "pm service not ready before attempt $i, waiting..."
+              for j in $(seq 1 12); do
+                adb shell pm path android >/dev/null 2>&1 && break
+                sleep 5
+              done
+            fi
             if adb install -t apk/app-debug.apk; then
+              INSTALLED=1
               break
             fi
             echo "adb install attempt $i failed, retrying..."
-            sleep 10
+            sleep 15
           done
+          if [ "$INSTALLED" != "1" ]; then
+            echo "ERROR: failed to install APK after 8 attempts"
+            exit 1
+          fi
           adb shell pm grant com.snoresleep.monitor android.permission.RECORD_AUDIO
           adb shell am start -n com.snoresleep.monitor/.MainActivity
           sleep 15
@@ -111,7 +125,9 @@ jobs:
           arch: x86_64
           target: google_apis
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          ram-size: 4096M
+          heap-size: 512M
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot-save
           script: ./emulator-test.sh
 
       - name: Upload logs and screenshot
