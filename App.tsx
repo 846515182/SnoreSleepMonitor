@@ -62,7 +62,7 @@ interface SleepSession {
 type Screen = 'home' | 'history' | 'detail' | 'settings';
 
 // 常量
-const CURRENT_VERSION = '1.2.0';
+const CURRENT_VERSION = '1.2.1';
 const GITHUB_OWNER = '846515182';
 const GITHUB_REPO = 'SnoreSleepMonitor';
 const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
@@ -722,7 +722,8 @@ export default function App() {
         try {
           // 把 JS 设置页里的阈值同步给原生模块，保证两端判定一致
           try {
-            await AudioMeter.setThresholds(snoreThreshold, grindThreshold, talkThreshold, apneaThreshold);
+            // 呼吸暂停判定由 JS 根据连续无声时长计算，原生模块只需打鼾/磨牙/梦话阈值
+            await AudioMeter.setThresholds(snoreThreshold, grindThreshold, talkThreshold);
           } catch (thresholdErr) {
             console.warn('同步阈值到原生模块失败', thresholdErr);
           }
@@ -835,6 +836,10 @@ export default function App() {
     } catch (e) {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
+      // 启动失败时必须清理底层引用，否则入口_guard_会阻止再次启动
+      useNativeMeterRef.current = false;
+      recordingRef.current = null;
+      recordingUriRef.current = '';
       setIsMonitoring(false);
       setIsFallbackMode(false);
       deactivateKeepAwake('monitor').catch(() => {});
@@ -961,7 +966,8 @@ export default function App() {
         }
       }
     } else if (silenceStartRef.current === null) {
-      silenceStartRef.current = sessionElapsed;
+      // 从最后一次响亮帧开始计算静默，避免 apnea 起点晚于真实静默开始
+      silenceStartRef.current = lastLoudTimeRef.current > 0 ? lastLoudTimeRef.current : sessionElapsed;
     }
   };
 
@@ -1404,7 +1410,7 @@ export default function App() {
           <View style={styles.volumeHeader}>
             <Text style={styles.volumeLabel}>实时音量</Text>
             <View style={[styles.badge, { backgroundColor: `${THEME.snore}15` }]}>
-              <Text style={[styles.badgeText, { color: THEME.snore }]}>鼾声阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
+              <Text style={[styles.badgeText, { color: THEME.snore }]}>鼾声置信度阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
             </View>
           </View>
           <View style={styles.volumeBarBg}>
@@ -1441,7 +1447,7 @@ export default function App() {
                 <Text style={[styles.confidenceValue, { color: THEME.talk }]}>{(talkConfidence * 100).toFixed(0)}%</Text>
               </View>
               <View style={[styles.confidenceChip, { backgroundColor: `${THEME.apnea}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: THEME.apnea }]}>异常呼吸</Text>
+                <Text style={[styles.confidenceLabel, { color: THEME.apnea }]}>异常呼吸音</Text>
                 <Text style={[styles.confidenceValue, { color: THEME.apnea }]}>{(apneaConfidence * 100).toFixed(0)}%</Text>
               </View>
             </View>
@@ -1613,8 +1619,13 @@ export default function App() {
                   </View>
                 </View>
               </View>
-              <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore) }]}>
-                <Text style={styles.qualityText}>{item.qualityScore}分</Text>
+              <View style={{ alignItems: 'flex-end' }}>
+                <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore) }]}>
+                  <Text style={styles.qualityText}>{item.qualityScore}分</Text>
+                </View>
+                <View style={[styles.apneaRiskBadge, { backgroundColor: getApneaRiskColor(item.apneaRisk || 'low'), marginTop: 6 }]}>
+                  <Text style={styles.apneaRiskText}>{getApneaRiskLabel(item.apneaRisk || 'low')}</Text>
+                </View>
               </View>
               <Ionicons name="chevron-forward" size={20} color={THEME.textTertiary} style={{ marginLeft: 8 }} />
             </View>
@@ -1648,11 +1659,6 @@ export default function App() {
           </View>
 
           <View style={styles.detailStatsGrid}>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="time-outline" size={20} color={THEME.primary} />
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.durationSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>睡眠时长</Text>
-            </View>
             <View style={styles.detailStatCard}>
               <Ionicons name="volume-high-outline" size={20} color={THEME.snore} />
               <Text style={styles.detailStatValue}>{selectedSession.snoreCount}</Text>
@@ -1692,6 +1698,11 @@ export default function App() {
               <Ionicons name="pulse-outline" size={20} color={THEME.apnea} />
               <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalApneaSeconds)}</Text>
               <Text style={styles.detailStatLabel}>呼吸暂停时长</Text>
+            </View>
+            <View style={styles.detailStatCard}>
+              <Ionicons name="list-outline" size={20} color={THEME.textSecondary} />
+              <Text style={styles.detailStatValue}>{selectedSession.events.length}</Text>
+              <Text style={styles.detailStatLabel}>事件总数</Text>
             </View>
           </View>
 
@@ -1832,8 +1843,9 @@ export default function App() {
                 {
                   text: '删除',
                   style: 'destructive',
-                  onPress: () => {
-                    deleteSession(selectedSession.id);
+                  onPress: async () => {
+                    await deleteSession(selectedSession.id);
+                    setSelectedSession(null);
                     setScreen('history');
                   },
                 },
@@ -2706,6 +2718,16 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     fontSize: 13,
   },
+  apneaRiskBadge: {
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+  },
+  apneaRiskText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 13,
+  },
   card: {
     backgroundColor: THEME.card,
     borderRadius: 24,
@@ -2717,12 +2739,9 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   detailTime: {
-    flex: 1,
     fontSize: 18,
     fontWeight: '800',
     color: THEME.text,
-    textAlign: 'center',
-    marginBottom: 18,
   },
   detailStatsGrid: {
     flexDirection: 'row',
