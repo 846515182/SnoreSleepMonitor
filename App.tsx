@@ -144,6 +144,16 @@ function cachePath(name: string): string {
   return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
 }
 
+// 录音文件存放在缓存目录，可能被清理逻辑或系统删除；播放前用于校验文件是否仍存在。
+async function recordingExists(uri: string): Promise<boolean> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return !!info.exists && !info.isDirectory;
+  } catch {
+    return false;
+  }
+}
+
 function parseVersion(version: string): number[] {
   return version
     .replace(/^v/i, '')
@@ -302,8 +312,10 @@ export default function App() {
       } catch (e) {
         console.warn('加载设置失败', e);
       }
-      await loadSessions();
+      // 先清理过期录音再加载会话：加载时会对账录音文件是否存在，
+      // 顺序保证对账看到的是清理后的真实文件系统状态。
       await cleanOldRecordings();
+      await loadSessions();
       const permitted = await checkPermission();
       if (mounted) {
         setHasPermission(permitted);
@@ -618,8 +630,17 @@ export default function App() {
             intensity: e.intensity,
           })),
         }));
-        normalized.sort((a, b) => b.startTime - a.startTime);
-        setSessions(normalized);
+        // 校验录音文件是否仍存在：缓存目录可能被系统或清理逻辑删除，
+        // 失效的 recordingUri 在此清空，避免详情页显示无法播放的按钮。
+        const reconciled = await Promise.all(
+          normalized.map(async (s) => {
+            if (!s.recordingUri) return s;
+            if (await recordingExists(s.recordingUri)) return s;
+            return { ...s, recordingUri: undefined };
+          })
+        );
+        reconciled.sort((a, b) => b.startTime - a.startTime);
+        setSessions(reconciled);
       }
     } catch (e) {
       console.warn('加载历史失败', e);
@@ -1205,6 +1226,23 @@ export default function App() {
 
   const playRecording = async (uri: string, startMs?: number) => {
     try {
+      // 录音存放在缓存目录，可能已被清理逻辑或系统删除。播放前先校验文件存在性，
+      // 避免直接交给 ExoPlayer 抛出 FileNotFoundException。
+      if (!(await recordingExists(uri))) {
+        // 清掉这条会话里失效的 recordingUri，UI 不再显示播放按钮。
+        setSessions((prev) =>
+          prev.map((s) => (s.recordingUri === uri ? { ...s, recordingUri: undefined } : s))
+        );
+        if (selectedSession?.recordingUri === uri) {
+          setSelectedSession((prev) => (prev ? { ...prev, recordingUri: undefined } : prev));
+        }
+        Alert.alert(
+          '录音无法播放',
+          '该录音文件已被清理（录音保留 3 天，或被系统/手动清理缓存）。事件记录仍可查看，但无法回放音频。',
+          [{ text: '知道了' }]
+        );
+        return;
+      }
       if (soundRef.current) {
         await soundRef.current.unloadAsync();
         soundRef.current = null;
@@ -1777,7 +1815,7 @@ export default function App() {
           ) : (
             <View style={styles.emptyRecordingBox}>
               <Ionicons name="mic-off-outline" size={32} color={THEME.textTertiary} />
-              <Text style={styles.noRecordingText}>未保存录音</Text>
+              <Text style={styles.noRecordingText}>暂无录音可回放</Text>
             </View>
           )}
 
