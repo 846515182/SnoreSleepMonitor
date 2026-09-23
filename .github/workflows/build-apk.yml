@@ -19,6 +19,10 @@ jobs:
       actions: read
     env:
       GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=512m"
+      # 签名密码必须在构建 Gradle 的步骤可见（signingConfig 通过 System.getenv 读取）
+      STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -76,10 +80,6 @@ jobs:
           test -s android/app/release.keystore
 
       - name: Inject release signing config
-        env:
-          STORE_PASSWORD: ${{ secrets.RELEASE_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
         run: |
           cat >> android/app/build.gradle << EOF
 
@@ -105,6 +105,8 @@ jobs:
         id: build-release-apk
         working-directory: ./android
         run: |
+          # pipefail: 否则 gradle 失败会被 tee 的退出码 0 掩盖
+          set -o pipefail
           ./gradlew assembleRelease --no-daemon --max-workers=1 --stacktrace 2>&1 | tee /tmp/gradle-build.log
         continue-on-error: true
 
@@ -125,6 +127,8 @@ jobs:
 
       - name: Verify APK signature
         run: |
+          set -o pipefail
+          test -s android/app/build/outputs/apk/release/app-release.apk
           APK=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
           "$APK" verify --print-certs android/app/build/outputs/apk/release/app-release.apk | head -5
 
