@@ -26,6 +26,9 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # 新版 SDK 已移除 'tools' 包，安装不存在的包会导致 sdkmanager 退出码 1
+          packages: 'platform-tools'
 
       - name: Install dependencies
         run: npm ci
@@ -40,7 +43,6 @@ jobs:
 
       - name: Build universal debug APK
         run: cd android && ./gradlew :app:assembleDebug --no-daemon
-
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
