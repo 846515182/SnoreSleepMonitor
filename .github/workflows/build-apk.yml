@@ -116,7 +116,7 @@ jobs:
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gradle-build-log
           path: /tmp/gradle-build.log
@@ -139,7 +139,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Upload APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: app-release
           path: |

@@ -44,7 +44,7 @@ jobs:
       - name: Build universal debug APK
         run: cd android && ./gradlew :app:assembleDebug --no-daemon
       - name: Upload debug APK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: app-debug
           path: android/app/build/outputs/apk/debug/*.apk
@@ -136,7 +136,7 @@ jobs:
 
       - name: Upload logs and screenshot
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emulator-test-logs
           path: |
