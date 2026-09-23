@@ -21,7 +21,7 @@
 该文件已从当前代码中删除，CI 改用 GitHub Secrets，但 **git 历史中仍然存在**。
 因此：
 
-### 轮换步骤（发布 v1.3.0 前必须完成）
+### 轮换步骤（✅ v1.3.0 发布前已完成轮换）
 
 1. 生成新密钥：
 
@@ -29,8 +29,13 @@
    keytool -genkeypair -v \
      -keystore release.keystore \
      -alias snoresleep \
-     -keyalg RSA -keysize 2048 -validity 10000
+     -keyalg RSA -keysize 2048 -validity 10950
    ```
+
+   > **注意**：默认 storetype 为 PKCS12，它不支持与 store 密码不同的 key 密码
+   > （keytool 会忽略 `-keypass`）。因此 `RELEASE_KEY_PASSWORD` 必须与
+   > `RELEASE_KEYSTORE_PASSWORD` 相同，否则 Gradle 签名时会报
+   > `Given final block not properly padded`。
 
 2. 把新 keystore 与密码写入仓库 **Settings → Secrets and variables → Actions**：
 
@@ -39,7 +44,7 @@
    | `RELEASE_KEYSTORE_BASE64` | `base64 -w0 release.keystore` 的输出 |
    | `RELEASE_KEYSTORE_PASSWORD` | 新密码（不要复用旧密码） |
    | `RELEASE_KEY_ALIAS` | `snoresleep` |
-   | `RELEASE_KEY_PASSWORD` | 新密码 |
+   | `RELEASE_KEY_PASSWORD` | 与 `RELEASE_KEYSTORE_PASSWORD` 相同（PKCS12 限制） |
 
 3. **不要**把 keystore 或密码提交到仓库（`.gitignore` 已忽略 `*.keystore`）。
 4. 本地离线备份新密钥（丢了无法再更新现有安装）。

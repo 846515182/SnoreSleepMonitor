@@ -51,7 +51,7 @@ npm start           # expo start
 | `RELEASE_KEYSTORE_BASE64` | `base64 -w0 release.keystore` |
 | `RELEASE_KEYSTORE_PASSWORD` | 密码 |
 | `RELEASE_KEY_ALIAS` | 别名（如 `snoresleep`） |
-| `RELEASE_KEY_PASSWORD` | 密码 |
+| `RELEASE_KEY_PASSWORD` | 与 `RELEASE_KEYSTORE_PASSWORD` 相同（PKCS12 不支持独立 keypass） |
 
 本地构建：
 
