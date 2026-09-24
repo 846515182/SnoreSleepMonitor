@@ -94,6 +94,24 @@ const APNEA_SOUND_CONF = 0.45; // YAMNet 异常呼吸音（喘息/喘鸣/喷气�
 const MIN_FREE_STORAGE_BYTES = 1500 * 1024 * 1024; // 开始监测前的剩余空间预警线（整晚 WAV 约 1GB）
 const MAX_CACHED_APKS = 3; // 最多保留几个更新包
 
+/** 设置页「检测阈值」分段切换的四类事件 */
+type ThresholdTab = 'snore' | 'grind' | 'talk' | 'apnea';
+
+/**
+ * 四类阈值集成到一个调节区分段切换：原先四个大区块（各带长文案+大滑条）
+ * 把设置页拉得很长，合并后只渲染当前选中的一类。
+ */
+const THRESHOLD_TABS: Array<{ key: ThresholdTab; label: string; desc: string }> = [
+  { key: 'snore', label: '打鼾', desc: '“打鼾”置信度达到该阈值且持续达标才记录一次，推荐 40%–60%。' },
+  { key: 'grind', label: '磨牙', desc: '“磨牙”置信度达到该阈值且事件持续 0.3–1.5 秒才记录，推荐 30%–45%。' },
+  { key: 'talk', label: '梦话', desc: '语音类声音置信度达到该阈值且达到最小时长才记录，推荐 45%–60%。' },
+  {
+    key: 'apnea',
+    label: '暂停',
+    desc: '连续无声超过该时长、随后由鼾声或呼吸声收口时判为一次疑似暂停（10–30 秒，推荐 10–15 秒）。仅供参考，不构成医疗诊断。',
+  },
+];
+
 function cachePath(name: string): string {
   const dir = FileSystem.cacheDirectory || '';
   return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
@@ -207,6 +225,7 @@ export default function App() {
   const [privacyAccepted, setPrivacyAccepted] = useState<boolean | null>(null);
   const [themePref, setThemePref] = useState<ThemePreference>('system');
   const [showAdvanced, setShowAdvanced] = useState(false); // 首页「高级信息」折叠
+  const [thresholdTab, setThresholdTab] = useState<ThresholdTab>('snore'); // 设置页阈值分段切换
 
   const colorScheme = useColorScheme();
   const T = resolveTheme(colorScheme, themePref);
@@ -726,8 +745,7 @@ export default function App() {
 
   /** 切换「保存整夜录音」偏好：合并写入设置，避免覆盖阈值字段 */
   const applySaveRecordingPref = async (value: boolean) => {
-    setSaveRecording(value);
-    try {
+    setSaveRecording(value);    try {
       const raw = await AsyncStorage.getItem(SETTINGS_KEY);
       const settings = raw ? JSON.parse(raw) : {};
       await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, saveRecording: value }));
@@ -1580,6 +1598,7 @@ export default function App() {
             </View>
             <Text style={styles.statValue}>{snoreCount}</Text>
             <Text style={styles.statLabel}>打鼾</Text>
+            <Text style={styles.statSub}>{formatDuration(snoreSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.grind}18` }]}>
@@ -1587,6 +1606,7 @@ export default function App() {
             </View>
             <Text style={styles.statValue}>{grindCount}</Text>
             <Text style={styles.statLabel}>磨牙</Text>
+            <Text style={styles.statSub}>{formatDuration(grindSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.talk}18` }]}>
@@ -1594,6 +1614,7 @@ export default function App() {
             </View>
             <Text style={styles.statValue}>{talkCount}</Text>
             <Text style={styles.statLabel}>梦话</Text>
+            <Text style={styles.statSub}>{formatDuration(talkSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.apnea}18` }]}>
@@ -1601,6 +1622,7 @@ export default function App() {
             </View>
             <Text style={styles.statValue}>{apneaCount}</Text>
             <Text style={styles.statLabel}>呼吸暂停</Text>
+            <Text style={styles.statSub}>{formatDuration(apneaSeconds)}</Text>
           </View>
         </View>
 
@@ -1608,9 +1630,7 @@ export default function App() {
         <View style={styles.volumeBox}>
           <View style={styles.volumeHeader}>
             <Text style={styles.volumeLabel}>实时音量</Text>
-            <View style={[styles.badge, { backgroundColor: `${T.snore}15` }]}>
-              <Text style={[styles.badgeText, { color: T.snore }]}>鼾声置信度阈值 {(snoreThreshold * 100).toFixed(0)}%</Text>
-            </View>
+            <Text style={styles.volumeHeaderValue}>{volumeDb.toFixed(1)} dB</Text>
           </View>
           <View style={styles.volumeBarBg}>
             <View
@@ -1624,9 +1644,11 @@ export default function App() {
             />
           </View>
           <View style={styles.volumeRow}>
-            <Text style={styles.volumeDb}>{volumeDb.toFixed(1)} dB</Text>
             <Text style={[styles.volumeState, { color: isSnoringNow ? T.danger : T.textSecondary }]}>
               {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
+            </Text>
+            <Text style={styles.volumeState}>
+              峰值 {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'} · 声音 {formatDuration(totalNoiseSeconds)}
             </Text>
           </View>
 
@@ -1686,41 +1708,8 @@ export default function App() {
               </Text>
             </View>
           )}
-
-          <View style={styles.maxVolumeRow}>
-            <Ionicons name="trophy-outline" size={13} color={T.warning} />
-            <Text style={[styles.volumeDb, { color: T.warning, marginLeft: 4 }]}>
-              本次最大：{maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'}
-            </Text>
-          </View>
-          <View style={[styles.maxVolumeRow, { marginTop: 4 }]}>
-            <Ionicons name="time-outline" size={13} color={T.textSecondary} />
-            <Text style={[styles.volumeDb, { color: T.textSecondary, marginLeft: 4 }]}>
-              声音时长：{formatDuration(totalNoiseSeconds)}
-            </Text>
-          </View>
             </>
           )}
-
-          {/* 各类事件累计时长 */}
-          <View style={styles.durationRow}>
-            <View style={styles.durationItem}>
-              <View style={[styles.durationDot, { backgroundColor: T.snore }]} />
-              <Text style={styles.durationLabel}>鼾声 {formatDuration(snoreSeconds)}</Text>
-            </View>
-            <View style={styles.durationItem}>
-              <View style={[styles.durationDot, { backgroundColor: T.grind }]} />
-              <Text style={styles.durationLabel}>磨牙 {formatDuration(grindSeconds)}</Text>
-            </View>
-            <View style={styles.durationItem}>
-              <View style={[styles.durationDot, { backgroundColor: T.talk }]} />
-              <Text style={styles.durationLabel}>梦话 {formatDuration(talkSeconds)}</Text>
-            </View>
-            <View style={styles.durationItem}>
-              <View style={[styles.durationDot, { backgroundColor: T.apnea }]} />
-              <Text style={styles.durationLabel}>暂停 {formatDuration(apneaSeconds)}</Text>
-            </View>
-          </View>
         </View>
 
         {/* 主按钮 */}
@@ -2083,6 +2072,46 @@ export default function App() {
     );
   };
 
+  /** 当前阈值 Tab 的取值、颜色与展示文本（供设置页复用） */
+  const activeTab = THRESHOLD_TABS.find((t) => t.key === thresholdTab) || THRESHOLD_TABS[0];
+  const thresholdValues: Record<ThresholdTab, number> = {
+    snore: snoreThreshold,
+    grind: grindThreshold,
+    talk: talkThreshold,
+    apnea: apneaThreshold,
+  };
+  const thresholdColors: Record<ThresholdTab, string> = {
+    snore: T.snore,
+    grind: T.grind,
+    talk: T.talk,
+    apnea: T.apnea,
+  };
+  const activeValue = thresholdValues[thresholdTab];
+  const activeColor = thresholdColors[thresholdTab];
+  const activeDisplay =
+    thresholdTab === 'apnea'
+      ? `${(apneaMinSilenceMs(activeValue) / 1000).toFixed(0)}秒`
+      : `${(activeValue * 100).toFixed(0)}%`;
+
+  /** 按当前 Tab 调整阈值（0.1–0.9，步进 0.05）并同步持久化 */
+  const adjustThreshold = (delta: number) => {
+    const val = Math.min(0.9, Math.max(0.1, parseFloat((activeValue + delta).toFixed(2))));
+    if (thresholdTab === 'snore') {
+      setSnoreThreshold(val);
+      saveSettings(val, grindThreshold, talkThreshold, apneaThreshold);
+    } else if (thresholdTab === 'grind') {
+      setGrindThreshold(val);
+      saveSettings(snoreThreshold, val, talkThreshold, apneaThreshold);
+    } else if (thresholdTab === 'talk') {
+      setTalkThreshold(val);
+      saveSettings(snoreThreshold, grindThreshold, val, apneaThreshold);
+    } else {
+      setApneaThreshold(val);
+      saveSettings(snoreThreshold, grindThreshold, talkThreshold, val);
+    }
+  };
+
+
   const renderSettings = () => (
     <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
       <View style={styles.header}>
@@ -2096,197 +2125,84 @@ export default function App() {
       <View style={styles.card}>
         <View style={styles.settingSection}>
           <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.snore}20` }]}>
-              <Ionicons name="volume-high-outline" size={20} color={T.snore} />
+            <View style={[styles.settingIconCircle, { backgroundColor: `${activeColor}20` }]}>
+              <Ionicons name="options-outline" size={20} color={activeColor} />
             </View>
-            <Text style={styles.sectionTitle}>鼾声检测阈值</Text>
+            <Text style={styles.sectionTitle}>检测阈值</Text>
           </View>
-          <Text style={styles.settingsDesc}>
-            YAMNet 模型聚合出“打鼾 / 磨牙 / 梦话 / 呼吸暂停 / 噪音”五类置信度。只有当“打鼾”置信度不低于该阈值，且连续满足条件达到最小持续时间，才会被记录为一次打鼾。推荐 40%–60%。
-          </Text>
-          <Text style={styles.thresholdValue}>{(snoreThreshold * 100).toFixed(0)}%</Text>
+
+          {/* 四类阈值集成：分段切换，只渲染当前类别的说明与滑条 */}
+          <View style={styles.segmentRow}>
+            {THRESHOLD_TABS.map((tab) => {
+              const active = thresholdTab === tab.key;
+              return (
+                <TouchableOpacity
+                  key={tab.key}
+                  style={[styles.segmentItem, active && styles.segmentItemActive]}
+                  onPress={() => setThresholdTab(tab.key)}
+                  activeOpacity={0.8}
+                >
+                  <Text
+                    style={[
+                      styles.segmentText,
+                      active && styles.segmentTextActive,
+                      active && { color: activeColor },
+                    ]}
+                  >
+                    {tab.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          <Text style={[styles.settingsDesc, { marginTop: 12 }]}>{activeTab.desc}</Text>
+          <Text style={styles.thresholdValue}>{activeDisplay}</Text>
           <View style={styles.sliderRow}>
             <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.snore}20` }]}
-              onPress={() => {
-                const val = Math.max(0.1, parseFloat((snoreThreshold - 0.05).toFixed(2)));
-                setSnoreThreshold(val);
-                saveSettings(val, grindThreshold, talkThreshold, apneaThreshold);
-              }}
+              style={[styles.adjustButton, { backgroundColor: `${activeColor}20` }]}
+              onPress={() => adjustThreshold(-0.05)}
             >
-              <Text style={[styles.adjustButtonText, { color: T.snore }]}>-</Text>
+              <Text style={[styles.adjustButtonText, { color: activeColor }]}>-</Text>
             </TouchableOpacity>
             <View style={styles.thresholdTrack}>
               <View
                 style={[
                   styles.thresholdFill,
-                  { width: `${((snoreThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: T.snore },
+                  { width: `${((activeValue - 0.1) / 0.8) * 100}%`, backgroundColor: activeColor },
                 ]}
               />
             </View>
             <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.snore}20` }]}
-              onPress={() => {
-                const val = Math.min(0.9, parseFloat((snoreThreshold + 0.05).toFixed(2)));
-                setSnoreThreshold(val);
-                saveSettings(val, grindThreshold, talkThreshold, apneaThreshold);
-              }}
+              style={[styles.adjustButton, { backgroundColor: `${activeColor}20` }]}
+              onPress={() => adjustThreshold(0.05)}
             >
-              <Text style={[styles.adjustButtonText, { color: T.snore }]}>+</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.grind}20` }]}>
-              <Ionicons name="git-branch-outline" size={20} color={T.grind} />
-            </View>
-            <Text style={styles.sectionTitle}>磨牙检测阈值</Text>
-          </View>
-          <Text style={styles.settingsDesc}>
-            通过“咀嚼 / 咬合 / 摩擦”类声音识别磨牙候选。当“磨牙”聚合置信度不低于该阈值，且事件持续时间在 0.3–1.5 秒之间，才会被记录。推荐 30%–45%。
-          </Text>
-          <Text style={styles.thresholdValue}>{(grindThreshold * 100).toFixed(0)}%</Text>
-          <View style={styles.sliderRow}>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.grind}20` }]}
-              onPress={() => {
-                const val = Math.max(0.1, parseFloat((grindThreshold - 0.05).toFixed(2)));
-                setGrindThreshold(val);
-                saveSettings(snoreThreshold, val, talkThreshold, apneaThreshold);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.grind }]}>-</Text>
-            </TouchableOpacity>
-            <View style={styles.thresholdTrack}>
-              <View
-                style={[
-                  styles.thresholdFill,
-                  { width: `${((grindThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: T.grind },
-                ]}
-              />
-            </View>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.grind}20` }]}
-              onPress={() => {
-                const val = Math.min(0.9, parseFloat((grindThreshold + 0.05).toFixed(2)));
-                setGrindThreshold(val);
-                saveSettings(snoreThreshold, val, talkThreshold, apneaThreshold);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.grind }]}>+</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.talk}20` }]}>
-              <Ionicons name="chatbubble-outline" size={20} color={T.talk} />
-            </View>
-            <Text style={styles.sectionTitle}>梦话检测阈值</Text>
-          </View>
-          <Text style={styles.settingsDesc}>
-            当“说话 / 对话 / 低语”等语音类聚合置信度不低于该阈值，且事件持续时间达到最小值，才会被记录为一次梦话。推荐 45%–60%。
-          </Text>
-          <Text style={styles.thresholdValue}>{(talkThreshold * 100).toFixed(0)}%</Text>
-          <View style={styles.sliderRow}>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.talk}20` }]}
-              onPress={() => {
-                const val = Math.max(0.1, parseFloat((talkThreshold - 0.05).toFixed(2)));
-                setTalkThreshold(val);
-                saveSettings(snoreThreshold, grindThreshold, val, apneaThreshold);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.talk }]}>-</Text>
-            </TouchableOpacity>
-            <View style={styles.thresholdTrack}>
-              <View
-                style={[
-                  styles.thresholdFill,
-                  { width: `${((talkThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: T.talk },
-                ]}
-              />
-            </View>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.talk}20` }]}
-              onPress={() => {
-                const val = Math.min(0.9, parseFloat((talkThreshold + 0.05).toFixed(2)));
-                setTalkThreshold(val);
-                saveSettings(snoreThreshold, grindThreshold, val, apneaThreshold);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.talk }]}>+</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-
-        <View style={styles.divider} />
-
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.apnea}20` }]}>
-              <Ionicons name="pulse-outline" size={20} color={T.apnea} />
-            </View>
-            <Text style={styles.sectionTitle}>呼吸暂停判定（连续无声时长）</Text>
-          </View>
-          <Text style={styles.settingsDesc}>
-            医学上呼吸暂停指气流停止 ≥10 秒（表现为“没有声音”）。当连续无声超过该时长、随后鼾声或喘息声恢复时，记为一次疑似呼吸暂停。调节范围 10–30 秒，推荐 10–15 秒。结果仅供筛查参考，不构成医疗诊断。
-          </Text>
-          <Text style={styles.thresholdValue}>{(apneaMinSilenceMs(apneaThreshold) / 1000).toFixed(0)}秒</Text>
-          <View style={styles.sliderRow}>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.apnea}20` }]}
-              onPress={() => {
-                const val = Math.max(0.1, parseFloat((apneaThreshold - 0.05).toFixed(2)));
-                setApneaThreshold(val);
-                saveSettings(snoreThreshold, grindThreshold, talkThreshold, val);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.apnea }]}>-</Text>
-            </TouchableOpacity>
-            <View style={styles.thresholdTrack}>
-              <View
-                style={[
-                  styles.thresholdFill,
-                  { width: `${((apneaThreshold - 0.1) / 0.8) * 100}%`, backgroundColor: T.apnea },
-                ]}
-              />
-            </View>
-            <TouchableOpacity
-              style={[styles.adjustButton, { backgroundColor: `${T.apnea}20` }]}
-              onPress={() => {
-                const val = Math.min(0.9, parseFloat((apneaThreshold + 0.05).toFixed(2)));
-                setApneaThreshold(val);
-                saveSettings(snoreThreshold, grindThreshold, talkThreshold, val);
-              }}
-            >
-              <Text style={[styles.adjustButtonText, { color: T.apnea }]}>+</Text>
+              <Text style={[styles.adjustButtonText, { color: activeColor }]}>+</Text>
             </TouchableOpacity>
           </View>
         </View>
 
         <TouchableOpacity
-          style={[styles.mainButton, { backgroundColor: T.textTertiary, marginTop: 8 }]}
+          style={[styles.actionButton, { backgroundColor: T.textTertiary, marginTop: 8 }]}
           onPress={() => {
             setSnoreThreshold(DEFAULT_SNORE_CONFIDENCE);
             setGrindThreshold(DEFAULT_GRIND_CONFIDENCE);
             setTalkThreshold(DEFAULT_TALK_CONFIDENCE);
             setApneaThreshold(DEFAULT_APNEA_CONFIDENCE);
-            saveSettings(DEFAULT_SNORE_CONFIDENCE, DEFAULT_GRIND_CONFIDENCE, DEFAULT_TALK_CONFIDENCE, DEFAULT_APNEA_CONFIDENCE);
+            saveSettings(
+              DEFAULT_SNORE_CONFIDENCE,
+              DEFAULT_GRIND_CONFIDENCE,
+              DEFAULT_TALK_CONFIDENCE,
+              DEFAULT_APNEA_CONFIDENCE
+            );
           }}
         >
-          <Ionicons name="refresh-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-          <Text style={styles.mainButtonText}>恢复默认</Text>
+          <Ionicons name="refresh-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+          <Text style={styles.actionButtonText}>恢复默认</Text>
         </TouchableOpacity>
       </View>
 
+      {/* 通用设置：原先四张独立卡片合并为一张，分隔线分区，按钮紧凑化 */}
       <View style={[styles.card, { marginTop: 16 }]}>
         <View style={styles.settingSection}>
           <View style={styles.settingHeader}>
@@ -2305,31 +2221,31 @@ export default function App() {
           </View>
           {updateCheckState === 'available' && latestRelease && (
             <TouchableOpacity
-              style={[styles.mainButton, styles.startButton, { marginBottom: 12 }]}
+              style={[styles.actionButton, { backgroundColor: T.primary, marginBottom: 8 }]}
               onPress={() => downloadAndInstallApk(latestRelease.downloadUrl)}
             >
-              <Ionicons name="download-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-              <Text style={styles.mainButtonText}>下载最新版本 APK</Text>
+              <Ionicons name="download-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+              <Text style={styles.actionButtonText}>下载最新版本 APK</Text>
             </TouchableOpacity>
           )}
           <TouchableOpacity
             style={[
-              styles.mainButton,
+              styles.actionButton,
               updateCheckState === 'checking' && { opacity: 0.6 },
               { backgroundColor: T.primary },
             ]}
             onPress={() => checkUpdate(true)}
             disabled={updateCheckState === 'checking'}
           >
-            <Ionicons name="refresh-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-            <Text style={styles.mainButtonText}>
+            <Ionicons name="refresh-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Text style={styles.actionButtonText}>
               {updateCheckState === 'checking' ? '检查中…' : '检查更新'}
             </Text>
           </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.divider} />
+
         <View style={styles.settingSection}>
           <View style={styles.settingHeader}>
             <View style={[styles.settingIconCircle, { backgroundColor: `${T.primary}20` }]}>
@@ -2337,9 +2253,7 @@ export default function App() {
             </View>
             <Text style={styles.sectionTitle}>外观主题</Text>
           </View>
-          <Text style={styles.settingsDesc}>
-            夜间使用建议选择「深色」或「跟随系统」，降低屏幕刺眼。设置立即生效并只保存在本机。
-          </Text>
+          <Text style={styles.settingsDesc}>夜间建议使用深色，设置立即生效并只保存在本机。</Text>
           <View style={styles.segmentRow}>
             {(
               [
@@ -2375,19 +2289,19 @@ export default function App() {
             <Text style={styles.sectionTitle}>隐私与数据</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            录音与声音识别全部在本机完成，不上传任何音频或数据；录音保留 3 天后自动清理，历史记录仅存于本机。
+            录音与识别全在本机完成，不上传数据；录音保留 3 天自动清理，历史记录仅存于本机。
           </Text>
           <TouchableOpacity
-            style={[styles.mainButton, { backgroundColor: T.primary }]}
+            style={[styles.actionButton, { backgroundColor: T.primary }]}
             onPress={openPrivacyPolicy}
           >
-            <Ionicons name="document-text-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-            <Text style={styles.mainButtonText}>查看隐私政策</Text>
+            <Ionicons name="document-text-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Text style={styles.actionButtonText}>查看隐私政策</Text>
           </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.divider} />
+
         <View style={styles.settingSection}>
           <View style={styles.settingHeader}>
             <View style={[styles.settingIconCircle, { backgroundColor: `${T.danger}20` }]}>
@@ -2396,19 +2310,19 @@ export default function App() {
             <Text style={styles.sectionTitle}>后台运行</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            为保证息屏后仍能持续录音和分析，建议将本应用设为“无电池优化”或“允许后台运行”。部分品牌手机（小米 / 华为 / OPPO / vivo）还需在“应用管理 - 省电策略”中手动关闭限制。
+            息屏后持续录音需允许后台运行，部分品牌（小米 / 华为 / OPPO / vivo）还需在省电策略中关闭限制。
           </Text>
           <TouchableOpacity
-            style={[styles.mainButton, { backgroundColor: T.danger }]}
+            style={[styles.actionButton, { backgroundColor: T.danger }]}
             onPress={openBatterySettings}
           >
-            <Ionicons name="shield-checkmark-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-            <Text style={styles.mainButtonText}>去设置后台权限</Text>
+            <Ionicons name="shield-checkmark-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Text style={styles.actionButtonText}>去设置后台权限</Text>
           </TouchableOpacity>
         </View>
-      </View>
 
-      <View style={[styles.card, { marginTop: 16 }]}>
+        <View style={styles.divider} />
+
         <View style={styles.settingSection}>
           <View style={styles.settingHeader}>
             <View style={[styles.settingIconCircle, { backgroundColor: `${T.warning}20` }]}>
@@ -2417,7 +2331,7 @@ export default function App() {
             <Text style={styles.sectionTitle}>存储空间</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            清理过期的录音和临时缓存文件，释放手机存储空间（历史记录不会被删除）。
+            清理过期录音和缓存，释放空间（历史记录不会被删除）。
           </Text>
 
           <View style={[styles.settingHeader, { marginTop: 4 }]}>
@@ -2427,7 +2341,7 @@ export default function App() {
             <Text style={styles.sectionTitle}>保存整夜录音</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            关闭后原生识别模式不再写入 WAV 文件（整晚约 1GB），鼾声统计照常进行，但该晚记录将无法回放录音。
+            关闭后不再写入 WAV（整晚约 1GB），鼾声统计照常，但该晚录音无法回放。
           </Text>
           <View style={styles.segmentRow}>
             {(
@@ -2452,10 +2366,8 @@ export default function App() {
             })}
           </View>
 
-          <View style={styles.divider} />
-
           <TouchableOpacity
-            style={[styles.mainButton, { backgroundColor: T.warning }]}
+            style={[styles.actionButton, { backgroundColor: T.warning, marginTop: 12 }]}
             onPress={async () => {
               try {
                 await cleanOldRecordings();
@@ -2466,8 +2378,8 @@ export default function App() {
               }
             }}
           >
-            <Ionicons name="sparkles-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-            <Text style={styles.mainButtonText}>清理缓存</Text>
+            <Ionicons name="sparkles-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Text style={styles.actionButtonText}>清理缓存</Text>
           </TouchableOpacity>
         </View>
       </View>

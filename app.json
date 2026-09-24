@@ -2,7 +2,7 @@
   "expo": {
     "name": "SnoreSleepMonitor",
     "slug": "SnoreSleepMonitor",
-    "version": "1.3.0",
+    "version": "1.4.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "splash": {
@@ -17,7 +17,7 @@
     },
     "android": {
       "package": "com.snoresleep.monitor",
-      "versionCode": 10300,
+      "versionCode": 10400,
       "adaptiveIcon": {
         "backgroundColor": "#F5F7FA",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -40,7 +40,7 @@
       [
         "expo-av",
         {
-          "microphonePermission": "睡眠监测需要访问麦克风以录制鼾声和环境音。"
+          "microphonePermission": "睡眠监测需要访问麦克风以录制鼾声和环境音�?
         }
       ],
       "./plugins/withAudioMeter.js"

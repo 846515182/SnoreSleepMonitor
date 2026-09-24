@@ -181,6 +181,13 @@ export const makeStyles = (T: Theme) =>
     color: T.textSecondary,
     marginTop: 2,
   },
+  /** 统计卡副行：各类事件累计时长（与次数一起展示，替代独立的时长行） */
+  statSub: {
+    fontSize: 10,
+    color: T.textTertiary,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
+  },
   volumeBox: {
     backgroundColor: T.background,
     borderRadius: 18,
@@ -207,16 +214,12 @@ export const makeStyles = (T: Theme) =>
     color: T.textSecondary,
     marginTop: 6,
   },
-  badge: {
-    backgroundColor: `${T.primary}15`,
-    borderRadius: 10,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-  },
-  badgeText: {
-    fontSize: 12,
+  /** 实时音量卡片头部右侧的当前分贝值 */
+  volumeHeaderValue: {
+    fontSize: 14,
     fontWeight: '700',
-    color: T.primary,
+    color: T.text,
+    fontVariant: ['tabular-nums'],
   },
   confidenceGrid: {
     flexDirection: 'row',
@@ -265,26 +268,6 @@ export const makeStyles = (T: Theme) =>
     alignItems: 'center',
     marginTop: 10,
   },
-  durationRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 10,
-    gap: 8,
-  },
-  durationItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  durationDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 4,
-  },
-  durationLabel: {
-    fontSize: 11,
-    color: T.textSecondary,
-  },
   intensityBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -315,6 +298,19 @@ export const makeStyles = (T: Theme) =>
   mainButtonText: {
     color: T.onAccent,
     fontSize: 17,
+    fontWeight: '700',
+  },
+  /** 设置页紧凑操作按钮（比 mainButton 矮，减少页面纵向长度） */
+  actionButton: {
+    borderRadius: 14,
+    paddingVertical: 11,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionButtonText: {
+    color: T.onAccent,
+    fontSize: 15,
     fontWeight: '700',
   },
   tipRow: {
