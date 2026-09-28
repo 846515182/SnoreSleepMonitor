@@ -22,7 +22,7 @@
   "devDependencies": {
     "@types/node": "^26.6.2",
     "@types/react": "~18.2.79",
-    "typescript": "~5.3.3"
+    "typescript": "~7.0.2"
   },
   "scripts": {
     "start": "expo start",
