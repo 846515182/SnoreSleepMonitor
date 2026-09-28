@@ -14,14 +14,14 @@
     "expo-keep-awake": "~13.0.2",
     "expo-status-bar": "~1.12.1",
     "expo-system-ui": "~3.0.7",
-    "react": "18.2.0",
-    "react-dom": "18.2.0",
-    "react-native": "0.74.7",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-native": "0.87.1",
     "react-native-web": "~0.19.12"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",
-    "@types/react": "~18.2.79",
+    "@types/react": "~19.3.0",
     "typescript": "~5.3.3"
   },
   "scripts": {
