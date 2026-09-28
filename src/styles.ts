@@ -263,11 +263,6 @@ export const makeStyles = (T: Theme) =>
     fontWeight: '700',
     marginLeft: 4,
   },
-  maxVolumeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 10,
-  },
   intensityBadge: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -485,9 +480,6 @@ export const makeStyles = (T: Theme) =>
     paddingVertical: 12,
     alignItems: 'center',
     marginBottom: 10,
-  },
-  detailStat: {
-    alignItems: 'center',
   },
   detailStatValue: {
     fontSize: 16,
