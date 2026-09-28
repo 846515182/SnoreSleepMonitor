@@ -3,6 +3,22 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.4.1 - 2026-09-29
+
+### 🧹 清理与验证
+
+- 移除 2 个未被引用的死样式（`maxVolumeRow` / `detailStat`），样式表 136→134 项，
+  所有被 `App.tsx` 引用的样式键均有定义、零悬空引用。
+- 新增多环境本地模拟验证（不入库的本地测试脚手架）：
+  - Expo 配置求值（version / versionCode / 中文权限文案 / 插件链）9 项断言；
+  - Metro 完整打包（649 模块 → Hermes 字节码）两轮；
+  - 全仓库 35 个文本文件 UTF-8 编码完整性扫描（防 app.json 编码事故复发）；
+  - 明暗双主题 makeStyles 实例化与样式引用交叉校验；
+  - **react-test-renderer 真实渲染全流程**：隐私同意 → 首页 → 开始监测 → 实时数据 →
+    停止落库 → 历史记录 → 记录详情 → 设置页（阈值分段/调节/恢复默认/主题切换）→ 卸载，
+    降级模式 48/48、原生 YAMNet 模拟模式 49/49 断言全部通过，期间无应用内错误日志。
+- CI（typecheck + 单测 25/25）与 Emulator Test 在本次提交上均通过。
+
 ## v1.4.0 - 2026-09-24
 
 ### 🎨 界面简化与集成（UI 重构）
