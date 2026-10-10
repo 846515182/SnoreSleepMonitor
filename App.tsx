@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   AppState,
+  BackHandler,
   FlatList,
   NativeModules,
   SafeAreaView,
@@ -1529,6 +1530,24 @@ export default function App() {
     }
   }, [screen]);
 
+  // Android 返回键 / 全面屏返回手势：按页面层级逐级后退，
+  // 首页与隐私页不拦截（交给系统默认行为 = 退出应用）。
+  // 此前未注册 hardwareBackPress 监听，导致返回手势/返回键在任何页面都无效。
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (screen === 'detail') {
+        setScreen('history');
+        return true;
+      }
+      if (screen === 'history' || screen === 'settings') {
+        setScreen('home');
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [screen]);
+
   // sessions 变化时自动持久化，避免 stopMonitoring / deleteSession 里直接写存储。
   const isInitialSessionsRef = useRef(true);
   useEffect(() => {
@@ -1648,7 +1667,7 @@ export default function App() {
         <View style={styles.heroAccentBar} />
         <View style={styles.heroHeader}>
           <View style={styles.appIconCircle}>
-            <Ionicons name="moon" size={26} color={T.onAccent} />
+            <Ionicons name="moon" size={22} color={T.onAccent} />
           </View>
           <View style={styles.heroTitleBlock}>
             <Text style={styles.title}>睡眠监测</Text>
@@ -1664,6 +1683,26 @@ export default function App() {
               <Text style={styles.updateBadgeText}>新版</Text>
             </TouchableOpacity>
           )}
+        </View>
+
+        {/* 快捷导航：紧贴顶部，任何机型打开即可看到，无需下滑 */}
+        <View style={styles.quickNavRow}>
+          <TouchableOpacity
+            style={styles.quickNavButton}
+            onPress={() => setScreen('history')}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="time-outline" size={17} color={T.primary} style={{ marginRight: 6 }} />
+            <Text style={styles.quickNavText}>历史记录</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.quickNavButton}
+            onPress={() => setScreen('settings')}
+            activeOpacity={0.85}
+          >
+            <Ionicons name="settings-outline" size={17} color={T.primary} style={{ marginRight: 6 }} />
+            <Text style={styles.quickNavText}>设置</Text>
+          </TouchableOpacity>
         </View>
 
         {hasPermission === false && (
@@ -1690,7 +1729,7 @@ export default function App() {
           </View>
         )}
 
-        {/* 计时器 */}
+        {/* 计时器：状态胶囊与时间同行，压缩纵向占用 */}
         <View style={styles.timerBox}>
           <View style={styles.timerPill}>
             <View style={[styles.timerDot, { backgroundColor: isMonitoring ? T.danger : T.textTertiary }]} />
@@ -1699,39 +1738,35 @@ export default function App() {
           <Text style={styles.timerValue}>{formatDuration(elapsedSeconds)}</Text>
         </View>
 
-        {/* 四类统计卡片 */}
+        {/* 四类统计：单行四列紧凑排布 */}
         <View style={styles.statsGrid}>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.snore}18` }]}>
-              <Ionicons name="volume-high" size={20} color={T.snore} />
+              <Ionicons name="volume-high" size={16} color={T.snore} />
             </View>
             <Text style={styles.statValue}>{snoreCount}</Text>
             <Text style={styles.statLabel}>打鼾</Text>
-            <Text style={styles.statSub}>{formatDuration(snoreSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.grind}18` }]}>
-              <Ionicons name="git-branch" size={20} color={T.grind} />
+              <Ionicons name="git-branch" size={16} color={T.grind} />
             </View>
             <Text style={styles.statValue}>{grindCount}</Text>
             <Text style={styles.statLabel}>磨牙</Text>
-            <Text style={styles.statSub}>{formatDuration(grindSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.talk}18` }]}>
-              <Ionicons name="chatbubble" size={20} color={T.talk} />
+              <Ionicons name="chatbubble" size={16} color={T.talk} />
             </View>
             <Text style={styles.statValue}>{talkCount}</Text>
             <Text style={styles.statLabel}>梦话</Text>
-            <Text style={styles.statSub}>{formatDuration(talkSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.apnea}18` }]}>
-              <Ionicons name="pulse" size={20} color={T.apnea} />
+              <Ionicons name="pulse" size={16} color={T.apnea} />
             </View>
             <Text style={styles.statValue}>{apneaCount}</Text>
             <Text style={styles.statLabel}>呼吸暂停</Text>
-            <Text style={styles.statSub}>{formatDuration(apneaSeconds)}</Text>
           </View>
         </View>
 
@@ -1817,6 +1852,14 @@ export default function App() {
               </Text>
             </View>
           )}
+
+          {/* 各类声音累计时长（从统计卡副行移入折叠区，保持首页一屏紧凑） */}
+          <View style={styles.durationRow}>
+            <Text style={styles.durationText}>打鼾 {formatDuration(snoreSeconds)}</Text>
+            <Text style={styles.durationText}>磨牙 {formatDuration(grindSeconds)}</Text>
+            <Text style={styles.durationText}>梦话 {formatDuration(talkSeconds)}</Text>
+            <Text style={styles.durationText}>暂停 {formatDuration(apneaSeconds)}</Text>
+          </View>
             </>
           )}
         </View>
@@ -1855,22 +1898,6 @@ export default function App() {
             <Text style={styles.tipText}>监测中 · 已启用后台录音，可息屏运行，建议连接充电器</Text>
           </View>
         )}
-      </View>
-
-      {/* 底部导航 */}
-      <View style={styles.navRow}>
-        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('history')} activeOpacity={0.85}>
-          <View style={[styles.navIconCircle, { backgroundColor: `${T.primary}15` }]}>
-            <Ionicons name="time" size={22} color={T.primary} />
-          </View>
-          <Text style={styles.navButtonText}>历史记录</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('settings')} activeOpacity={0.85}>
-          <View style={[styles.navIconCircle, { backgroundColor: `${T.primary}15` }]}>
-            <Ionicons name="settings" size={22} color={T.primary} />
-          </View>
-          <Text style={styles.navButtonText}>设置</Text>
-        </TouchableOpacity>
       </View>
     </ScrollView>
   );
