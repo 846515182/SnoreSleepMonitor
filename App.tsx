@@ -34,6 +34,7 @@ import { clipFinished, clipStartMs, selectSnoreClips } from './src/logic/clips';
 import { classifyFinalEvent, classifyIntensity, GRACE_MS } from './src/logic/events';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
+import { isRecordingExpired } from './src/logic/retention';
 import { formatBytes, formatClock, formatDuration, formatTime } from './src/utils/format';
 import {
   getApneaRiskColor,
@@ -458,7 +459,13 @@ export default function App() {
           try {
             const fileUri = recordingsDir.endsWith('/') ? `${recordingsDir}${name}` : `${recordingsDir}/${name}`;
             const fileInfo = await FileSystem.getInfoAsync(fileUri);
-            if (fileInfo.exists && fileInfo.modificationTime && now - fileInfo.modificationTime > MAX_RECORDING_AGE_MS) {
+            // modificationTime 的单位在 expo-file-system 各平台/版本间不一致（秒或毫秒），
+            // 交由 isRecordingExpired 归一化后再与保留期比较，避免误删当天录音。
+            if (
+              fileInfo.exists &&
+              fileInfo.modificationTime &&
+              isRecordingExpired(fileInfo.modificationTime, now, MAX_RECORDING_AGE_MS)
+            ) {
               await FileSystem.deleteAsync(fileInfo.uri, { idempotent: true });
             }
           } catch {
