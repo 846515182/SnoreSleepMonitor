@@ -518,6 +518,32 @@ export const makeStyles = (T: Theme) =>
   recordingBox: {
     marginBottom: 24,
   },
+  clipButton: {
+    borderRadius: 20,
+    paddingVertical: 14,
+    marginTop: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: `${T.primary}14`,
+    borderWidth: 1,
+    borderColor: `${T.primary}59`,
+  },
+  clipButtonDisabled: {
+    opacity: 0.45,
+  },
+  clipButtonText: {
+    color: T.primary,
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  clipProgressText: {
+    fontSize: 12,
+    color: T.textSecondary,
+    textAlign: 'center',
+    marginTop: 10,
+    fontVariant: ['tabular-nums'],
+  },
   emptyRecordingBox: {
     alignItems: 'center',
     backgroundColor: T.background,

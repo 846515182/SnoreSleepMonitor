@@ -30,6 +30,7 @@ import Constants from 'expo-constants';
 
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
+import { clipFinished, clipStartMs, selectSnoreClips } from './src/logic/clips';
 import { classifyFinalEvent, classifyIntensity, GRACE_MS } from './src/logic/events';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
@@ -213,6 +214,8 @@ export default function App() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
   const [playbackDurMs, setPlaybackDurMs] = useState(0); // 录音总时长（毫秒）
+  const [clipEvents, setClipEvents] = useState<SoundEvent[]>([]); // 连播中的鼾声片段（UI 显示“x/N 段”）
+  const [clipIndex, setClipIndex] = useState(-1); // 连播进行到的片段下标（-1 = 未在连播）
   const [isReady, setIsReady] = useState(false);
   const [latestRelease, setLatestRelease] = useState<LatestRelease | null>(null);
   const [updateCheckState, setUpdateCheckState] = useState<'idle' | 'checking' | 'available' | 'latest' | 'error'>('idle');
@@ -235,6 +238,10 @@ export default function App() {
   const recordingUriRef = useRef<string>('');
   const useNativeMeterRef = useRef<boolean>(false);
   const soundRef = useRef<Audio.Sound | null>(null);
+  // 连播模式状态机（ref 版本供异步状态回调读取，state 版本供 UI 渲染）
+  const clipModeRef = useRef<boolean>(false);
+  const clipListRef = useRef<SoundEvent[]>([]);
+  const clipIdxRef = useRef<number>(-1);
   const monitorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventsRef = useRef<SoundEvent[]>([]);
   const currentEventRef = useRef<SoundEvent | null>(null);
@@ -1359,6 +1366,22 @@ export default function App() {
         if (!status.isLoaded) return;
         setPlaybackPosMs(status.positionMillis || 0);
         setPlaybackDurMs(status.durationMillis || 0);
+        if (clipModeRef.current) {
+          // 连播模式：位置到达当前片段终点就推进到下一段
+          const clips = clipListRef.current;
+          const idx = clipIdxRef.current;
+          if (idx >= 0 && idx < clips.length) {
+            const dur = status.durationMillis || 0;
+            if (clipFinished(clips[idx], status.positionMillis || 0, dur || undefined)) {
+              advanceClip();
+            }
+          }
+          if (status.didJustFinish) {
+            // 音频先于最后一个片段播完（文件截断/异常）：直接收尾，不悬挂“播放中”状态
+            finishClips();
+          }
+          return;
+        }
         if (status.didJustFinish) {
           setIsPlaying(false);
           setPlaybackPosMs(0);
@@ -1376,9 +1399,87 @@ export default function App() {
     }
   };
 
+  // —— 鼾声片段连播状态机 ————————————————————————————————
+  // 退出连播模式并复位片段状态（不停止当前音频，供切换到整晚播放时复用）
+  const endClipMode = () => {
+    clipModeRef.current = false;
+    clipIdxRef.current = -1;
+    clipListRef.current = [];
+    setClipIndex(-1);
+    setClipEvents([]);
+  };
+
+  // 所有片段播完：停掉音频并复位“播放中”状态
+  const finishClips = async () => {
+    endClipMode();
+    setIsPlaying(false);
+    setPlaybackPosMs(0);
+    if (soundRef.current) {
+      try {
+        await soundRef.current.stopAsync();
+      } catch {
+        // 已停止则忽略
+      }
+    }
+  };
+
+  // 推进到下一片段；已到末尾则整体收尾
+  const advanceClip = async () => {
+    const clips = clipListRef.current;
+    const next = clipIdxRef.current + 1;
+    if (next >= clips.length) {
+      await finishClips();
+      return;
+    }
+    clipIdxRef.current = next;
+    setClipIndex(next);
+    const sound = soundRef.current;
+    if (!sound) return;
+    try {
+      await sound.setStatusAsync({ positionMillis: clipStartMs(clips[next]), shouldPlay: true });
+    } catch (e) {
+      console.warn('鼾声片段跳转失败', e);
+    }
+  };
+
+  // 一键连播当晚所有鼾声片段
+  const startClipPlayback = async () => {
+    const sess = selectedSession;
+    if (!sess?.recordingUri) return;
+    const clips = selectSnoreClips(sess.events);
+    if (clips.length === 0) {
+      Alert.alert('暂无鼾声片段', '当晚未检测到打鼾事件，无法连播。');
+      return;
+    }
+    clipModeRef.current = true;
+    clipListRef.current = clips;
+    clipIdxRef.current = 0;
+    setClipEvents(clips);
+    setClipIndex(0);
+    await playRecording(sess.recordingUri, clipStartMs(clips[0]));
+    // 加载失败（录音文件已被清理等）：回滚连播状态，避免按钮停留在“停止连播”
+    if (!soundRef.current) {
+      endClipMode();
+    }
+  };
+
+  // 整晚播放按钮：整晚播放中则停止；空闲或连播中则从头整晚播放
+  const toggleFullPlayback = async () => {
+    const uri = selectedSession?.recordingUri;
+    if (!uri) return;
+    if (isPlaying && clipIndex < 0) {
+      await stopPlayback();
+      return;
+    }
+    endClipMode();
+    await playRecording(uri);
+  };
+
   // 跳转到事件时间点播放
   const seekToEvent = async (evt: SoundEvent) => {
     if (!selectedSession?.recordingUri) return;
+    // 手动点事件 = 退出连播：后续按整晚播放进度高亮
+    endClipMode();
     // 若已加载同一录音，直接 seek；否则重新加载
     if (soundRef.current) {
       try {
@@ -1393,6 +1494,7 @@ export default function App() {
   };
 
   const stopPlayback = async () => {
+    endClipMode();
     if (soundRef.current) {
       await soundRef.current.stopAsync();
       setIsPlaying(false);
@@ -1843,6 +1945,9 @@ export default function App() {
 
   const renderDetail = () => {
     if (!selectedSession) return null;
+    const snoreClips = selectSnoreClips(selectedSession.events);
+    const hasSnoreClips = snoreClips.length > 0;
+    const clipPlaying = isPlaying && clipIndex >= 0;
     return (
       <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
         <View style={styles.header}>
@@ -1952,14 +2057,44 @@ export default function App() {
                 <Ionicons name="mic-outline" size={16} color={T.text} /> 录音回放
               </Text>
               <TouchableOpacity
-                style={[styles.mainButton, isPlaying ? styles.stopButton : styles.startButton]}
-                onPress={() =>
-                  isPlaying ? stopPlayback() : playRecording(selectedSession.recordingUri!)
-                }
+                style={[
+                  styles.mainButton,
+                  isPlaying && clipIndex < 0 ? styles.stopButton : styles.startButton,
+                ]}
+                onPress={toggleFullPlayback}
               >
-                <Ionicons name={isPlaying ? 'square' : 'play'} size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-                <Text style={styles.mainButtonText}>{isPlaying ? '停止播放' : '播放录音'}</Text>
+                <Ionicons
+                  name={isPlaying && clipIndex < 0 ? 'square' : 'play'}
+                  size={18}
+                  color={T.onAccent}
+                  style={{ marginRight: 8 }}
+                />
+                <Text style={styles.mainButtonText}>
+                  {isPlaying && clipIndex < 0 ? '停止播放' : '播放录音'}
+                </Text>
               </TouchableOpacity>
+
+              {/* 一键连播当晚所有鼾声片段（C 方案新功能） */}
+              <TouchableOpacity
+                style={[styles.clipButton, hasSnoreClips ? null : styles.clipButtonDisabled]}
+                disabled={!hasSnoreClips}
+                onPress={() => (clipPlaying ? stopPlayback() : startClipPlayback())}
+                activeOpacity={0.85}
+              >
+                <Ionicons name="albums-outline" size={18} color={T.primary} style={{ marginRight: 8 }} />
+                <Text style={styles.clipButtonText}>
+                  {clipPlaying
+                    ? `停止连播（第 ${clipIndex + 1}/${clipEvents.length} 段）`
+                    : hasSnoreClips
+                      ? `连播鼾声（${snoreClips.length} 段）`
+                      : '暂无鼾声片段'}
+                </Text>
+              </TouchableOpacity>
+              {clipPlaying && (
+                <Text style={styles.clipProgressText}>
+                  正在播放第 {clipIndex + 1}/{clipEvents.length} 段鼾声
+                </Text>
+              )}
               {playbackDurMs > 0 && (
                 <View style={{ marginTop: 16 }}>
                   <View style={styles.volumeBarBg}>
@@ -2004,8 +2139,11 @@ export default function App() {
             <View style={styles.timeline}>
               {selectedSession.events.slice(0, MAX_VISIBLE_EVENTS).map((evt, idx) => {
                 const absStart = selectedSession.startTime + evt.start;
-                const isCurrent =
-                  isPlaying && playbackPosMs >= evt.start - 500 && playbackPosMs <= evt.end + 500;
+                const isCurrent = clipPlaying
+                  ? clipEvents[clipIndex] === evt
+                  : isPlaying &&
+                    playbackPosMs >= evt.start - 500 &&
+                    playbackPosMs <= evt.end + 500;
                 const iconName =
                   evt.type === 'snore' ? 'volume-high-outline' :
                   evt.type === 'grind' ? 'git-branch-outline' :
