@@ -230,6 +230,7 @@ export default function App() {
   const [privacyAccepted, setPrivacyAccepted] = useState<boolean | null>(null);
   const [themePref, setThemePref] = useState<ThemePreference>('system');
   const [showAdvanced, setShowAdvanced] = useState(false); // 首页「高级信息」折叠
+  const [orbSize, setOrbSize] = useState(184); // 计时圆盘直径：由 timerZone onLayout 自适应
   const [thresholdTab, setThresholdTab] = useState<ThresholdTab>('snore'); // 设置页阈值分段切换
 
   const colorScheme = useColorScheme();
@@ -1729,13 +1730,32 @@ export default function App() {
           </View>
         )}
 
-        {/* 计时器：状态胶囊与时间同行，压缩纵向占用 */}
-        <View style={styles.timerBox}>
-          <View style={styles.timerPill}>
-            <View style={[styles.timerDot, { backgroundColor: isMonitoring ? T.danger : T.textTertiary }]} />
-            <Text style={styles.timerLabel}>{isMonitoring ? '监测中' : '待机'}</Text>
+        {/* 主体区：富余高度集中给居中的计时圆盘，屏幕铺满且留白有意为之 */}
+        <View style={styles.homeBody}>
+        {/* 计时圆盘：直径随可用高度自适应（大屏 184，小屏收缩到 130+），onLayout 驱动 */}
+        <View
+          style={styles.timerZone}
+          onLayout={(e) => {
+            const h = Math.round(e.nativeEvent.layout.height);
+            const next = Math.max(130, Math.min(184, h - 16));
+            setOrbSize((prev) => (Math.abs(prev - next) > 2 ? next : prev));
+          }}
+        >
+          <View style={[styles.timerOrb, { width: orbSize, height: orbSize, borderRadius: orbSize / 2 }]}>
+            <Ionicons
+              name={isMonitoring ? 'mic' : 'moon'}
+              size={Math.round(orbSize / 6)}
+              color={isMonitoring ? T.danger : T.primary}
+              style={{ marginBottom: 8 }}
+            />
+            <Text style={[styles.timerValue, { fontSize: Math.round(orbSize * 0.185) }]}>
+              {formatDuration(elapsedSeconds)}
+            </Text>
+            <View style={styles.timerPill}>
+              <View style={[styles.timerDot, { backgroundColor: isMonitoring ? T.danger : T.textTertiary }]} />
+              <Text style={styles.timerLabel}>{isMonitoring ? '监测中' : '待机'}</Text>
+            </View>
           </View>
-          <Text style={styles.timerValue}>{formatDuration(elapsedSeconds)}</Text>
         </View>
 
         {/* 四类统计：单行四列紧凑排布 */}
@@ -1862,6 +1882,7 @@ export default function App() {
           </View>
             </>
           )}
+        </View>
         </View>
 
         {/* 主按钮 */}

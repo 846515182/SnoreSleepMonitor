@@ -27,17 +27,44 @@ export const makeStyles = (T: Theme) =>
   homeContent: {
     padding: 12,
     paddingTop: 8,
+    // 撑满 ScrollView 可视高度：卡片得以从头贯到底，屏幕下方不再留白
+    flexGrow: 1,
   },
   heroCard: {
     backgroundColor: T.card,
     borderRadius: 24,
     padding: 16,
     overflow: 'hidden',
+    // 卡片纵向撑满：基础高度 = 内容，剩余空间全部吃掉（内容超长时自动恢复滚动）
+    flexGrow: 1,
     shadowColor: T.shadow,
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.07 * T.shadowOpacityScale,
     shadowRadius: 20,
     elevation: 5,
+  },
+  /** 首页主体：富余高度全部交给 timerZone（flexGrow），屏幕铺满不留白 */
+  homeBody: {
+    flexGrow: 1,
+    marginTop: 4,
+  },
+  /** 计时圆盘区：居中锚点，吸收卡片剩余高度 */
+  timerZone: {
+    flexGrow: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+  },
+  /** 计时圆盘：直径由 onLayout 自适应（宽高/圆角在 App.tsx 内联计算） */
+  timerOrb: {
+    backgroundColor: T.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: T.shadow,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08 * T.shadowOpacityScale,
+    shadowRadius: 28,
+    elevation: 3,
   },
   heroAccentBar: {
     position: 'absolute',
@@ -135,19 +162,14 @@ export const makeStyles = (T: Theme) =>
     lineHeight: 18,
     marginLeft: 12,
   },
-  timerBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginVertical: 12,
-  },
   timerPill: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: T.background,
+    backgroundColor: T.card,
     borderRadius: 20,
     paddingVertical: 6,
     paddingHorizontal: 14,
+    marginTop: 10,
   },
   timerDot: {
     width: 8,
