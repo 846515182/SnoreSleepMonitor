@@ -3,6 +3,27 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.4.6 - 2026-10-11
+
+### 🐛 修复：首页标题与手机状态栏文字重叠（真机反馈）
+
+- 现象：App 顶部「睡眠监测」标题区与状态栏的时钟/电量等系统文字叠在一起。
+- 根因：`expo-status-bar` 在 Android 上默认半透明状态栏（App 绘制延伸到
+  状态栏下方），而项目使用的是 React Native 自带的 `SafeAreaView`——
+  该组件**只在 iOS 生效，Android 上等于没有内边距**，于是标题直接顶进状态栏。
+- 修复：接入 Expo 官方支持的 `react-native-safe-area-context@4.10.5`：
+  根组件包裹 `SafeAreaProvider`，`SafeAreaView` 换用该库实现（Android/iOS
+  均返回真实 insets）。非透明状态栏的机型 insets 为 0，不会双重留白；
+  底部手势导航条同样获得安全距离，主按钮不再贴到导航条上。
+- 环境 E 新增断言：根组件必须包裹 `SafeAreaProvider`（防回归），
+  渲染双模式 47/47 通过。
+
+### 🧪 多环境验证
+
+- 单元测试 43/43、TypeScript 0 错误；
+- 环境 A/C/D ALL PASS；环境 E 双模式 47/47；
+- 环境 B Metro 完整打包通过（新增原生依赖后重新验证）。
+
 ## v1.4.5 - 2026-10-11
 
 ### 🐛 修复：首页内容不铺满屏幕，下方留大片空白（v1.4.4 引入的视觉问题）

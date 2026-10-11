@@ -5,7 +5,6 @@ import {
   BackHandler,
   FlatList,
   NativeModules,
-  SafeAreaView,
   ScrollView,
   StyleSheet,
   Text,
@@ -28,6 +27,7 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
@@ -178,6 +178,16 @@ async function fetchLatestRelease(): Promise<LatestRelease | null> {
 }
 
 export default function App() {
+  // 安全区提供者：Android 半透明状态栏/手势条与 iOS 刘海都会返回真实 insets，
+  // 标题不再叠到系统状态栏文字上（RN 自带 SafeAreaView 在 Android 上无效）。
+  return (
+    <SafeAreaProvider>
+      <AppInner />
+    </SafeAreaProvider>
+  );
+}
+
+function AppInner() {
   const [screen, setScreen] = useState<Screen>('home');
   const [selectedSession, setSelectedSession] = useState<SleepSession | null>(null);
   const [sessions, setSessions] = useState<SleepSession[]>([]);
