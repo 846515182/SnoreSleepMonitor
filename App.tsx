@@ -83,6 +83,8 @@ const CONSENT_KEY = '@snore_privacy_consent_v1';
 const THEME_PREF_KEY = '@snore_theme_pref_v1';
 /** 每 N 个监测周期写一次快照（CHUNK_MS = 300ms，100 个 ≈ 30 秒） */
 const ACTIVE_SNAPSHOT_TICKS = 100;
+/** 快照间隔（毫秒）：锁屏后 JS 定时器会被 RN 暂停，改由「每帧检查时间」触发 */
+const SNAPSHOT_INTERVAL_MS = 30_000;
 /** 详情页最多渲染的事件条数：整晚可能上千条，全量渲染会严重卡顿 */
 const MAX_VISIBLE_EVENTS = 200;
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
@@ -270,6 +272,7 @@ function AppInner() {
   /** 各类事件已结束的累计毫秒数：O(1) 更新，替代原先每帧 4 次全量 filter */
   const totalsRef = useRef({ snore: 0, grind: 0, talk: 0, apnea: 0 });
   const tickCountRef = useRef(0); // 监测循环计数，用于周期性落盘快照
+  const lastSnapshotAtRef = useRef(0); // 上一次落盘时间：锁屏后没有定时器，改用时间触发
   const eventsTruncatedRef = useRef<boolean>(false);
   const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
   const currentMaxSnoreConfRef = useRef<number>(0);
@@ -998,6 +1001,7 @@ function AppInner() {
       apneaTrackerRef.current.setMinSilenceMs(apneaMinSilenceMs(apneaThreshold));
       totalsRef.current = { snore: 0, grind: 0, talk: 0, apnea: 0 };
       tickCountRef.current = 0;
+      lastSnapshotAtRef.current = 0;
       eventsTruncatedRef.current = false;
       lastWindowIdRef.current = -1;
       setMaxVolumeDb(-100);
@@ -1098,6 +1102,13 @@ function AppInner() {
         sessionElapsed
       );
       detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, sessionElapsed, sConf);
+
+      // 锁屏后定时器停了，快照不能只靠 tick 计数：改成按时间落盘，
+      // 这样半夜被系统杀掉也不会丢掉整晚的事件（最多 30 秒）。
+      if (now - lastSnapshotAtRef.current >= SNAPSHOT_INTERVAL_MS) {
+        lastSnapshotAtRef.current = now;
+        writeActiveSnapshot(sessionElapsed);
+      }
     } catch (e) {
       console.warn('处理原生监测结果异常', e);
     }
