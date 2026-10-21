@@ -83,8 +83,6 @@ const CONSENT_KEY = '@snore_privacy_consent_v1';
 const THEME_PREF_KEY = '@snore_theme_pref_v1';
 /** 每 N 个监测周期写一次快照（CHUNK_MS = 300ms，100 个 ≈ 30 秒） */
 const ACTIVE_SNAPSHOT_TICKS = 100;
-/** 快照间隔（毫秒）：锁屏后 JS 定时器会被 RN 暂停，改由「每帧检查时间」触发 */
-const SNAPSHOT_INTERVAL_MS = 30_000;
 /** 详情页最多渲染的事件条数：整晚可能上千条，全量渲染会严重卡顿 */
 const MAX_VISIBLE_EVENTS = 200;
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
@@ -273,6 +271,8 @@ function AppInner() {
   const totalsRef = useRef({ snore: 0, grind: 0, talk: 0, apnea: 0 });
   const tickCountRef = useRef(0); // 监测循环计数，用于周期性落盘快照
   const lastSnapshotAtRef = useRef(0); // 上一次落盘时间：锁屏后没有定时器，改用时间触发
+  const lastSnapshotCountRef = useRef(-1); // 上次落盘时的事件条数：没新增事件就不必重复写
+  const monitoringRef = useRef(false); // 监测中标志：停止后到达的迟到帧一律丢弃
   const eventsTruncatedRef = useRef<boolean>(false);
   const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
   const currentMaxSnoreConfRef = useRef<number>(0);
@@ -724,6 +724,9 @@ function AppInner() {
 
   /** 写入进行中会话的增量快照（约 30 秒一次） */
   const writeActiveSnapshot = async (lastElapsedMs: number) => {
+    // 停止监测后（包括清空快照之后）绝不能再写：否则下一次启动会把同一条会话
+    // 当成“中断的会话”恢复一份副本，还会把刚录好的 WAV 删掉。
+    if (!monitoringRef.current) return;
     try {
       await AsyncStorage.setItem(
         ACTIVE_SESSION_KEY,
@@ -775,7 +778,8 @@ function AppInner() {
 
   /** 切换「保存整夜录音」偏好：合并写入设置，避免覆盖阈值字段 */
   const applySaveRecordingPref = async (value: boolean) => {
-    setSaveRecording(value);    try {
+    setSaveRecording(value);
+    try {
       const raw = await AsyncStorage.getItem(SETTINGS_KEY);
       const settings = raw ? JSON.parse(raw) : {};
       await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, saveRecording: value }));
@@ -892,7 +896,6 @@ function AppInner() {
 
     try {
       await setupAudioMode();
-      await activateKeepAwakeAsync('monitor');
 
       // 优先使用原生 AudioMeter 模块（Android），失败时自动降级到 expo-av
       let nativeStarted = false;
@@ -927,6 +930,9 @@ function AppInner() {
         useNativeMeterRef.current = false;
         setIsFallbackMode(true);
         lastMeteringRef.current = -100;
+        // 兼容模式没有前台服务兜底，只能靠屏幕常亮维持采集——代价是整晚亮屏、
+        // 费电且晃眼，所以只在降级时使用；正常（原生）路径绝不这样。
+        await activateKeepAwakeAsync('monitor').catch(() => {});
         // expo-av 回退方案：用 onRecordingStatusUpdate 回调获取 metering（比 getStatusAsync 更可靠）
         const recordingOptions: Audio.RecordingOptions = {
           isMeteringEnabled: true,
@@ -1004,7 +1010,10 @@ function AppInner() {
       lastSnapshotAtRef.current = 0;
       eventsTruncatedRef.current = false;
       lastWindowIdRef.current = -1;
+      lastSnapshotCountRef.current = -1;
       setMaxVolumeDb(-100);
+      // 先立起「监测中」标志，writeActiveSnapshot 才会真正落盘
+      monitoringRef.current = true;
       // 立即写一份快照，即使刚启动就崩溃也有据可查
       writeActiveSnapshot(0);
       // Android 13+：申请通知权限，让「监测中」通知可见
@@ -1028,6 +1037,7 @@ function AppInner() {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
       // 启动失败时必须清理底层引用，否则入口_guard_会阻止再次启动
+      monitoringRef.current = false;
       useNativeMeterRef.current = false;
       recordingRef.current = null;
       recordingUriRef.current = '';
@@ -1046,6 +1056,9 @@ function AppInner() {
    * 见 JavaTimerManager.onHostPause）。两条路都按 windowId 去重，同一帧不会计两次。
    */
   const applyNativeResult = (result: any) => {
+    // 停止监测后桥接里可能还有排队帧：丢掉，否则会在会话已结算后又改事件，
+    // 甚至把刚清掉的快照写回来。
+    if (!monitoringRef.current) return;
     try {
       const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
       const confs: Record<string, number> = result.confidences || {};
@@ -1105,8 +1118,14 @@ function AppInner() {
 
       // 锁屏后定时器停了，快照不能只靠 tick 计数：改成按时间落盘，
       // 这样半夜被系统杀掉也不会丢掉整晚的事件（最多 30 秒）。
-      if (now - lastSnapshotAtRef.current >= SNAPSHOT_INTERVAL_MS) {
+      // 没有新事件时降到 5 分钟一次，避免整晚反复写同一份 JSON。
+      const eventCount = eventsRef.current.length;
+      if (
+        eventCount !== lastSnapshotCountRef.current ||
+        now - lastSnapshotAtRef.current >= 5 * 60_000
+      ) {
         lastSnapshotAtRef.current = now;
+        lastSnapshotCountRef.current = eventCount;
         writeActiveSnapshot(sessionElapsed);
       }
     } catch (e) {
@@ -1304,6 +1323,8 @@ function AppInner() {
 
   const stopMonitoring = async () => {
     if (isBusy || !isMonitoring) return;
+    // 先落标志：之后任何迟到帧、任何快照写入都不会再影响这次会话
+    monitoringRef.current = false;
     setIsBusy(true);
     if (monitorTimerRef.current) {
       clearTimeout(monitorTimerRef.current);
@@ -1566,6 +1587,10 @@ function AppInner() {
   // 组件真正卸载时（应用被杀死或页面关闭）再由下方 cleanup effect 收尾。
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active') {
+        // 从系统设置里授权后回到 App：重新读一次，否则首页还挂着「未获得麦克风权限」
+        hasMicPermission().then((ok) => setHasPermission(ok)).catch(() => {});
+      }
       if (nextAppState === 'background' || nextAppState === 'inactive') {
         if (isMonitoring) {
           // 前台服务会持有麦克风并显示通知，用户回到前台时界面继续刷新即可。
