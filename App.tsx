@@ -5,6 +5,7 @@ import {
   BackHandler,
   FlatList,
   NativeModules,
+  DeviceEventEmitter,
   ScrollView,
   StyleSheet,
   Text,
@@ -1034,66 +1035,95 @@ function AppInner() {
     }
   };
 
+  /**
+   * 处理一帧原生结果：分类、事件累积、暂停筛查。
+   *
+   * 这帧可能来自前台轮询，也可能来自原生主动推送（锁屏后 JS 定时器会被 RN 暂停，
+   * 见 JavaTimerManager.onHostPause）。两条路都按 windowId 去重，同一帧不会计两次。
+   */
+  const applyNativeResult = (result: any) => {
+    try {
+      const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
+      const confs: Record<string, number> = result.confidences || {};
+      const sConf = confs.snoring ?? 0;
+      const gConf = confs.grinding ?? 0;
+      const tConf = confs.talking ?? 0;
+      const aConf = confs.apnea ?? 0;
+      const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
+      const tConfAll = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
+      const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
+      setVolumeDb(metering);
+      setSnoreConfidence(sConf);
+      setGrindConfidence(gConf);
+      setTalkConfidence(tConf);
+      setApneaConfidence(aConf);
+      setTopClass(tClass);
+      setTopConfidence(tConfAll);
+      setConfidences(confs);
+      if (metering > maxVolumeDbRef.current) {
+        maxVolumeDbRef.current = metering;
+        setMaxVolumeDb(metering);
+      }
+
+      const now = Date.now();
+      const sessionElapsed = now - startTimeRef.current;
+      setElapsedSeconds(Math.floor(sessionElapsed / 1000));
+
+      // YAMNet 推理窗口 0.975s、轮询 300ms：同一推理结果只计一帧，避免帧统计失真。
+      if (windowId === lastWindowIdRef.current) {
+        return;
+      }
+      lastWindowIdRef.current = windowId;
+
+      // 帧级分类：打鼾/梦话仍要求是该帧 top 类别；
+      // 磨牙放宽为只要置信度超过阈值且高于其它两类事件即可（不必胜过噪音），
+      // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
+      const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
+      const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf;
+      const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
+      const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
+      // 异常呼吸音（喘息/喘鸣/喷气）不再单独计为事件，但可用来确认一次暂停的结束。
+      const isApneaSound = aConf >= APNEA_SOUND_CONF;
+
+      if (isSnoreFrame) {
+        setSnoreIntensity(classifyIntensity(sConf));
+      } else if (!isLoud) {
+        setSnoreIntensity(null);
+      }
+      setIsSnoringNow(isLoud);
+      // loud = 任意事件帧，用于锚定静音起点；
+      // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
+      trackSilence(
+        { loud: isLoud || isApneaSound, breath: isSnoreFrame || isApneaSound },
+        sessionElapsed
+      );
+      detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, sessionElapsed, sConf);
+    } catch (e) {
+      console.warn('处理原生监测结果异常', e);
+    }
+  };
+
+  // 原生结果推送：锁屏后 JS 定时器会被 RN 暂停，这条桥接通道不受影响，
+  // 否则整晚只在录音、事件一条都记不下来。
+  const applyNativeResultRef = useRef<(r: any) => void>(() => {});
+  useEffect(() => {
+    applyNativeResultRef.current = applyNativeResult;
+  });
+
+  useEffect(() => {
+    if (!AudioMeter) return;
+    const sub = DeviceEventEmitter.addListener('AudioMeterResult', (r: any) => {
+      if (!useNativeMeterRef.current) return;
+      applyNativeResultRef.current(r);
+    });
+    return () => sub.remove();
+  }, []);
+
   const monitorLoop = async () => {
-    // 原生模块路径：使用 YAMNet 多分类模型
+    // 原生模块路径：使用 YAMNet 多分类模型（前台走轮询，后台靠上面的事件推送）
     if (useNativeMeterRef.current && AudioMeter) {
       try {
-        const result = await AudioMeter.getLatestResult();
-        const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
-        const confs: Record<string, number> = result.confidences || {};
-        const sConf = confs.snoring ?? 0;
-        const gConf = confs.grinding ?? 0;
-        const tConf = confs.talking ?? 0;
-        const aConf = confs.apnea ?? 0;
-        const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
-        const tConfAll = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
-        const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
-        setVolumeDb(metering);
-        setSnoreConfidence(sConf);
-        setGrindConfidence(gConf);
-        setTalkConfidence(tConf);
-        setApneaConfidence(aConf);
-        setTopClass(tClass);
-        setTopConfidence(tConfAll);
-        setConfidences(confs);
-        if (metering > maxVolumeDbRef.current) {
-          maxVolumeDbRef.current = metering;
-          setMaxVolumeDb(metering);
-        }
-
-        const now = Date.now();
-        const sessionElapsed = now - startTimeRef.current;
-        setElapsedSeconds(Math.floor(sessionElapsed / 1000));
-
-        // YAMNet 推理窗口 0.975s、轮询 300ms：同一推理结果只计一帧，避免帧统计失真。
-        if (windowId === lastWindowIdRef.current) {
-          return;
-        }
-        lastWindowIdRef.current = windowId;
-
-        // 帧级分类：打鼾/梦话仍要求是该帧 top 类别；
-        // 磨牙放宽为只要置信度超过阈值且高于其它两类事件即可（不必胜过噪音），
-        // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
-        const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
-        const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf;
-        const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
-        const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
-        // 异常呼吸音（喘息/喘鸣/喷气）不再单独计为事件，但可用来确认一次暂停的结束。
-        const isApneaSound = aConf >= APNEA_SOUND_CONF;
-
-        if (isSnoreFrame) {
-          setSnoreIntensity(classifyIntensity(sConf));
-        } else if (!isLoud) {
-          setSnoreIntensity(null);
-        }
-        setIsSnoringNow(isLoud);
-        // loud = 任意事件帧，用于锚定静音起点；
-        // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
-        trackSilence(
-          { loud: isLoud || isApneaSound, breath: isSnoreFrame || isApneaSound },
-          sessionElapsed
-        );
-        detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, sessionElapsed, sConf);
+        applyNativeResult(await AudioMeter.getLatestResult());
       } catch (e) {
         console.warn('原生监测循环异常', e);
       }

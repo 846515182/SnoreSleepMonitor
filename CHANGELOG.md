@@ -3,6 +3,32 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## v1.4.7 - 2026-10-21
+
+### 🐛 修复：锁屏后整晚「只有录音、零事件」（真机反馈）
+
+- 现象：晚上开监测 → 锁屏睡觉 → 早上起来只有一段录音，打鼾/磨牙/梦话
+  一个都没标出来，疑似暂停也没有。
+- 根因：识别结果完全靠 JS 里的 `setTimeout` 递归轮询
+  `AudioMeter.getLatestResult()`。React Native 的 `JavaTimerManager` 在
+  Activity 暂停（锁屏 / 切后台）时会暂停全部 JS 定时器
+  （`onHostPause` → `isPaused = true`，`createTimer` 直接返回），
+  于是锁屏那一刻轮询链就断了：**原生 AudioRecord 线程还在录音、YAMNet 还在推理，
+  但结果没人取，事件一条都记不下来**。WAV 由原生写，所以录音是完整的 —— 
+  这正是「只有录音」的原因。
+- 修复：
+  - 原生模块每处理完一帧（含静音帧）就 `emitDeviceEvent("AudioMeterResult")`
+    主动推送，桥接事件不受定时器暂停影响；
+  - App 侧抽出 `applyNativeResult()`，前台仍可轮询、锁屏后由推送接管，
+    两条路按 `windowId` 去重，同一帧绝不重复计数；
+  - 轮询保留作为兜底（原生推送异常时前台照常工作）。
+- 回归防护：新增 `background-detection.test.ts`，钉死「原生必须推送 +
+  界面必须订阅 + 必须按 windowId 去重」，任一端被删掉都会红。
+
+### 🧪 验证
+
+- 单元测试 45/45（新增 2 条）、TypeScript 0 错误。
+
 ## v1.4.6 - 2026-10-11
 
 ### 🐛 修复：首页标题与手机状态栏文字重叠（真机反馈）
