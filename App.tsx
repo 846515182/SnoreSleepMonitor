@@ -209,7 +209,7 @@ function AppInner() {
   const [grindThreshold, setGrindThreshold] = useState(DEFAULT_GRIND_CONFIDENCE);
   const [talkThreshold, setTalkThreshold] = useState(DEFAULT_TALK_CONFIDENCE);
   const [apneaThreshold, setApneaThreshold] = useState(DEFAULT_APNEA_CONFIDENCE);
-  // 是否保存整夜 WAV 录音（P1 存储）：关闭后只识别不写盘，一晚可省约 1GB
+  // 是否录音：默认录完整晚再裁成鼾声片段；关闭后只识别、不写盘
   const [saveRecording, setSaveRecording] = useState(true);
   /** 是否连没打呼噜的部分也留着（默认只留鼾声片段，省空间也不占隐私） */
   const [keepFullRecording, setKeepFullRecording] = useState(false);
