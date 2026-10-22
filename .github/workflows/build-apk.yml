@@ -30,9 +30,16 @@ jobs:
       - name: Verify tag matches package.json version
         run: |
           VERSION=$(node -p "require('./package.json').version")
+          APP_VERSION=$(node -p "require('./app.json').expo.version")
           TAG="${GITHUB_REF_NAME}"
           if [ "$TAG" != "v$VERSION" ]; then
             echo "Tag $TAG does not match package.json version v$VERSION"
+            exit 1
+          fi
+          # 应用内显示的版本号与升级比较取自 app.json（Constants.expoConfig.version），
+          # 两处不一致会导致「装的是新版、界面还显示旧版、永远提示有新版本」。
+          if [ "$APP_VERSION" != "$VERSION" ]; then
+            echo "app.json version $APP_VERSION does not match package.json version $VERSION"
             exit 1
           fi
 
@@ -159,9 +166,10 @@ jobs:
             echo
             if [ -f CHANGELOG.md ]; then
               # 提取本版本的变更小节（以 ## v$VERSION 开头到下一个 ## 之间）
+              # 标题行是「## v1.5.0 - 日期」，必须前缀匹配，不能整行相等
               awk -v ver="## v$VERSION" '
-                $0 == ver {flag=1; next}
-                /^## v/ && flag {flag=0}
+                index($0, ver) == 1 {flag=1; next}
+                /^## / && flag {flag=0}
                 flag {print}
               ' CHANGELOG.md
             fi

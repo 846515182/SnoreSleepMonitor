@@ -5,13 +5,22 @@
 export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
-export const MIN_SNORE_MS = 1500; // 最小打鼾持续时间 1.5 秒（约 2 个 YAMNet 帧）
+export const MIN_SNORE_MS = 1500; // 最小打鼾持续时间 1.5 秒（3 个 YAMNet 帧；2 帧只有 975ms）
 export const MIN_SNORE_FRAMES = 3; // 至少 3 帧都被判成鼾声才算一次，单帧多半是误触
 export const MIN_SNORE_RATIO = 0.6; // 鼾声帧占比门槛（以前 0.5 太松）
 export const MIN_GRIND_MS = 300; // 最小磨牙持续时间 0.3 秒
 export const MAX_GRIND_MS = 1500; // 磨牙事件一般不超过 1.5 秒
 export const MIN_TALK_MS = 500; // 最小梦话持续时间 0.5 秒
-export const GRACE_MS = 700; // 静音宽限期：小于此值的静音不结束事件
+/**
+ * 静音宽限期：小于此值的静音不结束事件。
+ *
+ * 必须大于一个完整的「鼾声—换气」周期，否则真人每个呼吸周期都会被拆成一条事件：
+ * YAMNet 一帧 0.975 秒，真人打鼾通常是「响 1–2 秒 + 停 1–2 秒」，
+ * 原来的 700ms 意味着只要出现一帧换气就收尾，2 帧的碎片全部达不到 3 帧门槛，
+ * 结果是整晚一条鼾声都记不到（已用整晚模拟复现）。
+ * 3000ms 可以跨过 1–3 帧换气，又不会把半分钟后的另一段声音并进来。
+ */
+export const GRACE_MS = 3000;
 
 export interface FrameCounts {
   snore: number;

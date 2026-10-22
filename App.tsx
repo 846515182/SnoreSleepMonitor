@@ -33,7 +33,14 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
 import { clipFinished, clipStartMs, planSnoreAudio, selectSnoreClips } from './src/logic/clips';
-import { classifyFinalEvent, classifyIntensity, GRACE_MS } from './src/logic/events';
+import { classifyIntensity } from './src/logic/events';
+import {
+  classifyFrame,
+  DEFAULT_SNORE_CONFIDENCE,
+  DEFAULT_GRIND_CONFIDENCE,
+  DEFAULT_TALK_CONFIDENCE,
+} from './src/logic/frame';
+import { SoundEventDetector } from './src/logic/detector';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
 import { isRecordingExpired } from './src/logic/retention';
@@ -86,17 +93,11 @@ const ACTIVE_SNAPSHOT_TICKS = 100;
 /** 详情页最多渲染的事件条数：整晚可能上千条，全量渲染会严重卡顿 */
 const MAX_VISIBLE_EVENTS = 200;
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
-const DEFAULT_SNORE_CONFIDENCE = 0.45; // 默认鼾声置信度阈值（YAMNet 更准，可适当放宽）
-const DEFAULT_GRIND_CONFIDENCE = 0.25; // 默认磨牙置信度阈值（YAMNet 聚合分数）
-const DEFAULT_TALK_CONFIDENCE = 0.5; // 默认梦话置信度阈值
 const DEFAULT_APNEA_CONFIDENCE = 0.1; // 默认呼吸暂停判定：连续无声 10 秒（滑块 0.1–0.9 映射 10–30 秒）
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
-/** 鼾声的最低音量（dBFS）：太轻的声音不可能是一个人躺在手机旁边打鼾 */
-const SNORE_MIN_DB = -50;
 const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WAV 约 115MB/小时，避免撑爆存储）
 const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
 const MAX_PERSISTED_SESSIONS = 200; // 历史记录持久化条数上限
-const APNEA_SOUND_CONF = 0.45; // YAMNet 异常呼吸音（喘息/喘鸣/喷气）置信度，用于确认一次暂停结束
 const MIN_FREE_STORAGE_BYTES = 1500 * 1024 * 1024; // 开始监测前的剩余空间预警线（整晚 WAV 约 1GB）
 const MAX_CACHED_APKS = 3; // 最多保留几个更新包
 
@@ -268,11 +269,8 @@ function AppInner() {
   const clipIdxRef = useRef<number>(-1);
   const monitorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventsRef = useRef<SoundEvent[]>([]);
-  const currentEventRef = useRef<SoundEvent | null>(null);
-  const currentSnoreFramesRef = useRef<number>(0);
-  const currentGrindFramesRef = useRef<number>(0);
-  const currentTalkFramesRef = useRef<number>(0);
-  const currentTotalFramesRef = useRef<number>(0);
+  /** 声音事件状态机（纯逻辑，见 src/logic/detector.ts，可用模拟数据单测） */
+  const detectorRef = useRef<SoundEventDetector>(new SoundEventDetector());
   /** 呼吸暂停状态机：带上限与呼吸声上下文，避免“安静一整晚”被误判为一次长暂停 */
   const apneaTrackerRef = useRef<ApneaTracker>(
     new ApneaTracker({ minSilenceMs: apneaMinSilenceMs(DEFAULT_APNEA_CONFIDENCE) })
@@ -286,10 +284,8 @@ function AppInner() {
   const eventsTruncatedRef = useRef<boolean>(false);
   const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
   const audioStalledRef = useRef(false); // 原生录音线程停过：报告要如实标成中断
-  const currentMaxSnoreConfRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
-  const lastLoudTimeRef = useRef<number>(0); // 最后一次响亮的时间
   const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
   const downloadResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
 
@@ -1029,13 +1025,7 @@ function AppInner() {
       setConfidences({});
       setSnoreIntensity(null);
       eventsRef.current = [];
-      currentEventRef.current = null;
-      currentSnoreFramesRef.current = 0;
-      currentGrindFramesRef.current = 0;
-      currentTalkFramesRef.current = 0;
-      currentTotalFramesRef.current = 0;
-      currentMaxSnoreConfRef.current = 0;
-      lastLoudTimeRef.current = 0;
+      detectorRef.current.reset();
       maxVolumeDbRef.current = -100;
       apneaTrackerRef.current.reset();
       apneaTrackerRef.current.setMinSilenceMs(apneaMinSilenceMs(apneaThreshold));
@@ -1124,40 +1114,32 @@ function AppInner() {
       setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
       // YAMNet 推理窗口 0.975s、轮询 300ms：同一推理结果只计一帧，避免帧统计失真。
-      if (windowId === lastWindowIdRef.current) {
-        return;
+      // 原生没给 windowId 时不能用 -1 去重：否则第二帧之后全被当成重复丢掉。
+      if (windowId >= 0) {
+        if (windowId === lastWindowIdRef.current) {
+          return;
+        }
+        lastWindowIdRef.current = windowId;
       }
-      lastWindowIdRef.current = windowId;
 
-      // 帧级分类：打鼾/梦话仍要求是该帧 top 类别；
-      // 磨牙放宽为只要置信度超过阈值且高于其它两类事件即可（不必胜过噪音），
-      // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
-      // 鼾声三道门槛：本帧 top 类别是 snoring、置信度过阈值、音量不能太小。
-      // 加音量门槛是因为远处的电视声/雨声偶尔也会被 YAMNet 判成 snoring，
-      // 但它们到手机时已经很轻；真人打鼾（手机放床头）基本都在 -50dB 以上。
-      const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold && metering >= SNORE_MIN_DB;
-      // 磨牙不再只比三个类别的相对大小：必须是磨牙类声音（或置信度很高）才算，
-      // 否则翻身、呼吸的帧也会被算成磨牙，再把整段事件带成「打鼾」。
-      const isGrindFrame =
-        (tClass === 'grinding' || gConf >= 0.5) && gConf >= sConf && gConf >= tConf;
-      const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
-      const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
-      // 异常呼吸音（喘息/喘鸣/喷气）不再单独计为事件，但可用来确认一次暂停的结束。
-      const isApneaSound = aConf >= APNEA_SOUND_CONF;
+      // 帧级分类收敛到 src/logic/frame.ts：App 与「整晚模拟」测试用同一套规则
+      const flags = classifyFrame(
+        { topClass: tClass, confidences: confs, amplitudeDb: metering },
+        { snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold }
+      );
 
-      if (isSnoreFrame) {
+      if (flags.snore) {
         setSnoreIntensity(classifyIntensity(sConf));
-      } else if (!isLoud) {
+      } else if (!flags.loud) {
         setSnoreIntensity(null);
       }
-      setIsSnoringNow(isLoud);
+      setIsSnoringNow(flags.loud);
       // loud = 任意事件帧，用于锚定静音起点；
       // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
-      trackSilence(
-        { loud: isLoud || isApneaSound, breath: isSnoreFrame || isApneaSound },
-        sessionElapsed
-      );
-      detectEvent(isSnoreFrame, isGrindFrame, isTalkFrame, sessionElapsed, sConf);
+      trackSilence({ loud: flags.loud || flags.apneaSound, breath: flags.breath }, sessionElapsed);
+      const finished = detectorRef.current.push(sessionElapsed, flags, sConf);
+      if (finished) recordEvent(finished);
+      updateNoiseTotals();
 
       // 锁屏后定时器停了，快照不能只靠 tick 计数：改成按时间落盘，
       // 这样半夜被系统杀掉也不会丢掉整晚的事件（最多 30 秒）。
@@ -1266,103 +1248,29 @@ function AppInner() {
     setApneaSeconds(Math.floor(t.apnea / 1000));
   };
 
-  // 事件检测：按帧标记为鼾声/磨牙/梦话，事件结束时根据帧比例与持续时间分类。
-  // （呼吸暂停改由 trackSilence 基于连续无声区间检测，不再走声音事件帧。）
-  const detectEvent = (
-    isSnoreFrame: boolean,
-    isGrindFrame: boolean,
-    isTalkFrame: boolean,
-    sessionElapsed: number,
-    snoreConf: number
-  ) => {
-    const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
-
-    if (isLoud) {
-      lastLoudTimeRef.current = sessionElapsed;
-      if (!currentEventRef.current) {
-        currentEventRef.current = {
-          start: sessionElapsed,
-          end: sessionElapsed,
-          duration: 0,
-          type: 'snore',
-        };
-        currentSnoreFramesRef.current = isSnoreFrame ? 1 : 0;
-        currentGrindFramesRef.current = isGrindFrame ? 1 : 0;
-        currentTalkFramesRef.current = isTalkFrame ? 1 : 0;
-        currentTotalFramesRef.current = 1;
-        currentMaxSnoreConfRef.current = isSnoreFrame ? snoreConf : 0;
-      } else {
-        currentEventRef.current.end = sessionElapsed;
-        currentEventRef.current.duration = sessionElapsed - currentEventRef.current.start;
-        currentTotalFramesRef.current += 1;
-        if (isSnoreFrame) {
-          currentSnoreFramesRef.current += 1;
-          if (snoreConf > currentMaxSnoreConfRef.current) {
-            currentMaxSnoreConfRef.current = snoreConf;
-          }
-        }
-        if (isGrindFrame) currentGrindFramesRef.current += 1;
-        if (isTalkFrame) currentTalkFramesRef.current += 1;
-      }
-    } else {
-      // 静音时，只有超过宽限期才结束当前事件
-      const silenceDuration = sessionElapsed - lastLoudTimeRef.current;
-      if (silenceDuration >= GRACE_MS) {
-        finalizeCurrentEvent();
-      }
+  // 事件落定：写进事件表并累计（O(1)），不再每帧全量 filter。
+  const recordEvent = (evt: SoundEvent) => {
+    if (eventsRef.current.length >= MAX_EVENTS_PER_SESSION) {
+      eventsTruncatedRef.current = true;
+      return;
     }
+    eventsRef.current.push(evt);
+    accumulate(evt);
+    if (evt.type === 'snore') setSnoreCount((c) => c + 1);
+    else if (evt.type === 'grind') setGrindCount((c) => c + 1);
+    else if (evt.type === 'talk') setTalkCount((c) => c + 1);
+  };
 
-    // 每帧 O(1) 更新：已结束事件时长走 totalsRef，进行中事件单独加进来，
-    // 避免旧实现每 300ms 对最多上千条事件做 4 次全量 filter。
+  /** 界面上的累计时长：已结束事件 + 进行中这一段 */
+  const updateNoiseTotals = () => {
     const t = totalsRef.current;
     const finishedNoiseMs = t.snore + t.grind + t.talk;
-    const ongoing = currentEventRef.current ? currentEventRef.current.duration : 0;
+    const ongoing = detectorRef.current.ongoingDurationMs;
     setTotalNoiseSeconds(Math.floor((finishedNoiseMs + ongoing) / 1000));
     setSnoreSeconds(Math.floor(t.snore / 1000));
     setGrindSeconds(Math.floor(t.grind / 1000));
     setTalkSeconds(Math.floor(t.talk / 1000));
     setApneaSeconds(Math.floor(t.apnea / 1000));
-  };
-
-  const finalizeCurrentEvent = () => {
-    const evt = currentEventRef.current;
-    if (!evt) return;
-
-    const duration = evt.end - evt.start;
-    const classified = classifyFinalEvent(
-      duration,
-      {
-        snore: currentSnoreFramesRef.current,
-        grind: currentGrindFramesRef.current,
-        talk: currentTalkFramesRef.current,
-        total: currentTotalFramesRef.current,
-      },
-      currentMaxSnoreConfRef.current
-    );
-
-    if (classified) {
-      if (eventsRef.current.length < MAX_EVENTS_PER_SESSION) {
-        const stored: SoundEvent = {
-          ...evt,
-          type: classified.type,
-          intensity: classified.intensity,
-        };
-        eventsRef.current.push(stored);
-        accumulate(stored);
-        if (classified.type === 'snore') setSnoreCount((c) => c + 1);
-        else if (classified.type === 'grind') setGrindCount((c) => c + 1);
-        else if (classified.type === 'talk') setTalkCount((c) => c + 1);
-      } else {
-        eventsTruncatedRef.current = true;
-      }
-    }
-
-    currentEventRef.current = null;
-    currentSnoreFramesRef.current = 0;
-    currentGrindFramesRef.current = 0;
-    currentTalkFramesRef.current = 0;
-    currentTotalFramesRef.current = 0;
-    currentMaxSnoreConfRef.current = 0;
   };
 
   const stopMonitoring = async () => {
@@ -1403,7 +1311,8 @@ function AppInner() {
       const endTime = Date.now();
 
       // 收尾当前事件
-      finalizeCurrentEvent();
+      const lastEvent = detectorRef.current.flush();
+      if (lastEvent) recordEvent(lastEvent);
 
       // 默认只留鼾声：把整晚录音裁成「只有打呼噜的片段」，原始文件删掉。
       // 用户要求过「没打呼噜的别录」——整晚 WAV 里 95% 是安静和翻身声，既占空间也没意义。
