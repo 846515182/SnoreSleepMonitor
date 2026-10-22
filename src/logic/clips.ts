@@ -27,6 +27,13 @@ export interface ClipWindow {
  * - 退化窗口（end <= start，来自脏数据或钳制）兜底为起点后 1 秒，保证至少能播一段。
  */
 export function clipWindow(evt: SoundEvent, audioDurationMs?: number): ClipWindow {
+  // 裁剪过的鼾声文件：位置已经按片段排好，前后留白在裁剪时就加进去了，
+  // 不能再往外扩，否则会串到下一段鼾声里。
+  if (typeof evt.playStart === 'number') {
+    const start = Math.max(0, evt.playStart);
+    const end = typeof evt.playEnd === 'number' && evt.playEnd > start ? evt.playEnd : start + 1000;
+    return { start, end };
+  }
   const start = Math.max(0, evt.start - CLIP_PAD_BEFORE_MS);
   let end = evt.end + CLIP_PAD_AFTER_MS;
   if (typeof audioDurationMs === 'number' && audioDurationMs > 0) {
@@ -76,4 +83,82 @@ export function selectSnoreClips(events: readonly SoundEvent[]): SoundEvent[] {
     .filter((e) => e.type === 'snore')
     .slice()
     .sort((a, b) => a.start - b.start);
+}
+
+/** 鼾声片段最多保留的总时长：45 分钟（16kHz 单声道约 86MB） */
+export const MAX_SNORE_AUDIO_MS = 45 * 60 * 1000;
+
+/** 两段鼾声离得比这还近就并成一段，免得片段之间夹一堆静音 */
+export const CLIP_MERGE_GAP_MS = 400;
+
+export interface SnoreAudioPlan {
+  /** 要从原录音里拷出来的区间（毫秒，升序、互不重叠） */
+  ranges: { start: number; end: number }[];
+  /** 与传入的 events 下标对齐；-1 表示这条事件没有对应音频 */
+  offsets: number[];
+  /** 裁剪后文件的总时长 */
+  totalMs: number;
+}
+
+/**
+ * 计划「只保留鼾声」的裁剪区间。
+ *
+ * 原录音是整晚的（含大量安静时段），用户只想留打呼噜的声音：
+ * 把每个鼾声事件前后各留一点上下文，合并挨得太近的段，再按上限截断。
+ * 返回的 offsets 用来把事件映射到新文件里的位置，回放时直接跳过去。
+ */
+export function planSnoreAudio(
+  events: readonly SoundEvent[],
+  maxTotalMs: number = MAX_SNORE_AUDIO_MS
+): SnoreAudioPlan {
+  const snoreIdx: number[] = [];
+  events.forEach((e, i) => {
+    if (e.type === 'snore') snoreIdx.push(i);
+  });
+  snoreIdx.sort((a, b) => events[a].start - events[b].start);
+
+  const ranges: { start: number; end: number }[] = [];
+  let cur: { start: number; end: number } | null = null;
+  let total = 0;
+
+  const pushCur = () => {
+    if (!cur) return;
+    let len = cur.end - cur.start;
+    if (total + len > maxTotalMs) len = Math.max(0, maxTotalMs - total);
+    if (len > 0) {
+      ranges.push({ start: cur.start, end: cur.start + len });
+      total += len;
+    }
+    cur = null;
+  };
+
+  for (const i of snoreIdx) {
+    if (total >= maxTotalMs) break;
+    const ev = events[i];
+    const s = Math.max(0, Math.round(ev.start - CLIP_PAD_BEFORE_MS));
+    const e = Math.max(s + 1, Math.round(ev.end + CLIP_PAD_AFTER_MS));
+    if (cur && s <= cur.end + CLIP_MERGE_GAP_MS) {
+      cur.end = Math.max(cur.end, e);
+    } else {
+      pushCur();
+      if (total >= maxTotalMs) break;
+      cur = { start: s, end: e };
+    }
+  }
+  pushCur();
+
+  const offsets: number[] = new Array(events.length).fill(-1);
+  let base = 0;
+  for (let k = 0; k < ranges.length; k++) {
+    const r = ranges[k];
+    for (const i of snoreIdx) {
+      const ev = events[i];
+      if (ev.start >= r.start && ev.start < r.end) {
+        offsets[i] = base + (ev.start - r.start);
+      }
+    }
+    base += r.end - r.start;
+  }
+
+  return { ranges, offsets, totalMs: total };
 }

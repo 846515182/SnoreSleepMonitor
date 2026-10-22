@@ -18,10 +18,20 @@ test('classifyIntensity 按置信度分三档', () => {
   assert.equal(classifyIntensity(0.55), 'moderate');
 });
 
-test('打鼾：帧占比 >= 0.5 且时长达标', () => {
-  const evt = classifyFinalEvent(1000, { snore: 6, grind: 2, talk: 2, total: 10 }, 0.8);
+test('打鼾：占比 >= 0.6、至少 3 帧、时长 >= 1.5 秒', () => {
+  const evt = classifyFinalEvent(2000, { snore: 7, grind: 2, talk: 1, total: 10 }, 0.8);
   assert.equal(evt?.type, 'snore');
   assert.equal(evt?.intensity, 'severe');
+});
+
+test('打鼾帧只有 2 帧 -> 不记（单次误触最常见的形态）', () => {
+  const evt = classifyFinalEvent(3000, { snore: 2, grind: 8, talk: 0, total: 10 }, 0.9);
+  assert.notEqual(evt?.type, 'snore');
+});
+
+test('打鼾占比 0.55（旧门槛能过）-> 现在不记', () => {
+  const evt = classifyFinalEvent(3000, { snore: 55, grind: 45, talk: 0, total: 100 }, 0.9);
+  assert.notEqual(evt?.type, 'snore');
 });
 
 test('打鼾时长不足 -> 降级尝试其他类型', () => {

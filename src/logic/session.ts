@@ -17,6 +17,8 @@ export interface SummarizeInput {
   endTime: number;
   events: SoundEvent[];
   recordingUri?: string;
+  /** 录音模式：snore = 只保留了鼾声片段（事件位置要用 playStart） */
+  recordingMode?: 'snore' | 'full';
   eventsTruncated?: boolean;
   /** 监测被中断后恢复的记录 */
   interrupted?: boolean;
@@ -87,6 +89,7 @@ export function summarizeSession(input: SummarizeInput): SleepSession {
     totalTalkSeconds,
     totalApneaSeconds,
     recordingUri: input.recordingUri,
+    recordingMode: input.recordingMode,
     qualityScore: calculateQualityScore(durationSeconds, totalNoiseSeconds),
     apneaRisk: computeRisk(ahi),
     intensityBreakdown,

@@ -16,6 +16,13 @@ export interface SoundEvent {
   intensity?: SnoreIntensity;
   /** 静音时长超过上限时被截断（保留字段，当前策略下不产生） */
   capped?: boolean;
+  /**
+   * 在「裁剪后的鼾声文件」里的可播放起点（毫秒）。
+   * 默认录音是整晚原文件，这两个字段为空；开启「只保存鼾声片段」后，
+   * 音频文件只剩鼾声，原来的 start/end 已经对不上，必须用这两个偏移回放。
+   */
+  playStart?: number;
+  playEnd?: number;
 }
 
 export type ApneaRisk = 'low' | 'moderate' | 'high';
@@ -35,6 +42,8 @@ export interface SleepSession {
   totalTalkSeconds: number;
   totalApneaSeconds: number;
   recordingUri?: string;
+  /** snore = 音频已裁成只剩鼾声片段；full = 整晚原始录音 */
+  recordingMode?: 'snore' | 'full';
   /** 声音维度评分 0-100 */
   qualityScore: number;
   /** 疑似呼吸暂停风险分级 */

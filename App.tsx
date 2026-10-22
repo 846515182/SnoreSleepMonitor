@@ -32,7 +32,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
-import { clipFinished, clipStartMs, selectSnoreClips } from './src/logic/clips';
+import { clipFinished, clipStartMs, planSnoreAudio, selectSnoreClips } from './src/logic/clips';
 import { classifyFinalEvent, classifyIntensity, GRACE_MS } from './src/logic/events';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
@@ -91,6 +91,8 @@ const DEFAULT_GRIND_CONFIDENCE = 0.25; // 默认磨牙置信度阈值（YAMNet �
 const DEFAULT_TALK_CONFIDENCE = 0.5; // 默认梦话置信度阈值
 const DEFAULT_APNEA_CONFIDENCE = 0.1; // 默认呼吸暂停判定：连续无声 10 秒（滑块 0.1–0.9 映射 10–30 秒）
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
+/** 鼾声的最低音量（dBFS）：太轻的声音不可能是一个人躺在手机旁边打鼾 */
+const SNORE_MIN_DB = -50;
 const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WAV 约 115MB/小时，避免撑爆存储）
 const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
 const MAX_PERSISTED_SESSIONS = 200; // 历史记录持久化条数上限
@@ -121,7 +123,13 @@ function cachePath(name: string): string {
   return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
 }
 
-// 录音文件存放在缓存目录，可能被清理逻辑或系统删除；播放前用于校验文件是否仍存在。
+/** 永久目录（对应原生 filesDir）：系统清理缓存时不会动这里 */
+function docPath(name: string): string {
+  const dir = FileSystem.documentDirectory || '';
+  return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`;
+}
+
+// 录音文件可能被保留期清理逻辑删掉；播放前用于校验文件是否仍存在。
 async function recordingExists(uri: string): Promise<boolean> {
   try {
     const info = await FileSystem.getInfoAsync(uri);
@@ -203,6 +211,8 @@ function AppInner() {
   const [apneaThreshold, setApneaThreshold] = useState(DEFAULT_APNEA_CONFIDENCE);
   // 是否保存整夜 WAV 录音（P1 存储）：关闭后只识别不写盘，一晚可省约 1GB
   const [saveRecording, setSaveRecording] = useState(true);
+  /** 是否连没打呼噜的部分也留着（默认只留鼾声片段，省空间也不占隐私） */
+  const [keepFullRecording, setKeepFullRecording] = useState(false);
   const [snoreConfidence, setSnoreConfidence] = useState(0);
   const [grindConfidence, setGrindConfidence] = useState(0);
   const [talkConfidence, setTalkConfidence] = useState(0);
@@ -275,6 +285,7 @@ function AppInner() {
   const monitoringRef = useRef(false); // 监测中标志：停止后到达的迟到帧一律丢弃
   const eventsTruncatedRef = useRef<boolean>(false);
   const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
+  const audioStalledRef = useRef(false); // 原生录音线程停过：报告要如实标成中断
   const currentMaxSnoreConfRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
@@ -307,6 +318,9 @@ function AppInner() {
           }
           if (typeof settings.saveRecording === 'boolean' && mounted) {
             setSaveRecording(settings.saveRecording);
+          }
+          if (typeof settings.keepFullRecording === 'boolean' && mounted) {
+            setKeepFullRecording(settings.keepFullRecording);
           }
         }
       } catch (e) {
@@ -463,34 +477,38 @@ function AppInner() {
 
   // 清理超过保留期的录音文件，防止缓存无限增长。
   const cleanOldRecordings = async () => {
-    try {
-      const recordingsDir = cachePath('recordings');
-      const info = await FileSystem.getInfoAsync(recordingsDir);
-      if (!info.exists || !info.isDirectory) return;
-      const entries = await FileSystem.readDirectoryAsync(recordingsDir);
-      const now = Date.now();
-      await Promise.all(
-        entries.map(async (name) => {
-          if (!name.endsWith('.wav')) return;
-          try {
-            const fileUri = recordingsDir.endsWith('/') ? `${recordingsDir}${name}` : `${recordingsDir}/${name}`;
-            const fileInfo = await FileSystem.getInfoAsync(fileUri);
-            // modificationTime 的单位在 expo-file-system 各平台/版本间不一致（秒或毫秒），
-            // 交由 isRecordingExpired 归一化后再与保留期比较，避免误删当天录音。
-            if (
-              fileInfo.exists &&
-              fileInfo.modificationTime &&
-              isRecordingExpired(fileInfo.modificationTime, now, MAX_RECORDING_AGE_MS)
-            ) {
-              await FileSystem.deleteAsync(fileInfo.uri, { idempotent: true });
+    // 旧版本录音在 cache/recordings，1.4.9 起改到 files/recordings（系统不会清缓存），
+    // 两个目录都要扫，否则老文件永远删不掉。
+    const dirs = [docPath('recordings'), docPath('clips'), cachePath('recordings')];
+    const now = Date.now();
+    for (const recordingsDir of dirs) {
+      try {
+        const info = await FileSystem.getInfoAsync(recordingsDir);
+        if (!info.exists || !info.isDirectory) continue;
+        const entries = await FileSystem.readDirectoryAsync(recordingsDir);
+        await Promise.all(
+          entries.map(async (name) => {
+            if (!name.endsWith('.wav')) return;
+            try {
+              const fileUri = recordingsDir.endsWith('/') ? `${recordingsDir}${name}` : `${recordingsDir}/${name}`;
+              const fileInfo = await FileSystem.getInfoAsync(fileUri);
+              // modificationTime 的单位在 expo-file-system 各平台/版本间不一致（秒或毫秒），
+              // 交由 isRecordingExpired 归一化后再与保留期比较，避免误删当天录音。
+              if (
+                fileInfo.exists &&
+                fileInfo.modificationTime &&
+                isRecordingExpired(fileInfo.modificationTime, now, MAX_RECORDING_AGE_MS)
+              ) {
+                await FileSystem.deleteAsync(fileInfo.uri, { idempotent: true });
+              }
+            } catch {
+              // ignore
             }
-          } catch {
-            // ignore
-          }
-        })
-      );
-    } catch (e) {
-      console.warn('清理旧录音失败', e);
+          })
+        );
+      } catch (e) {
+        console.warn('清理旧录音失败', e);
+      }
     }
   };
 
@@ -769,6 +787,7 @@ function AppInner() {
           apneaThreshold: nextApnea,
           // 一并回写，避免覆盖掉用户已保存的录音偏好
           saveRecording,
+          keepFullRecording,
         })
       );
     } catch (e) {
@@ -776,13 +795,28 @@ function AppInner() {
     }
   };
 
-  /** 切换「保存整夜录音」偏好：合并写入设置，避免覆盖阈值字段 */
+  /** 切换「保存录音」偏好：合并写入设置，避免覆盖阈值字段 */
   const applySaveRecordingPref = async (value: boolean) => {
     setSaveRecording(value);
     try {
       const raw = await AsyncStorage.getItem(SETTINGS_KEY);
       const settings = raw ? JSON.parse(raw) : {};
       await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...settings, saveRecording: value }));
+    } catch (e) {
+      console.warn('保存录音偏好失败', e);
+    }
+  };
+
+  /** 切换「保留整晚原始录音」：默认只留鼾声片段 */
+  const applyKeepFullPref = async (value: boolean) => {
+    setKeepFullRecording(value);
+    try {
+      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+      const settings = raw ? JSON.parse(raw) : {};
+      await AsyncStorage.setItem(
+        SETTINGS_KEY,
+        JSON.stringify({ ...settings, keepFullRecording: value })
+      );
     } catch (e) {
       console.warn('保存录音偏好失败', e);
     }
@@ -1010,6 +1044,7 @@ function AppInner() {
       lastSnapshotAtRef.current = 0;
       eventsTruncatedRef.current = false;
       lastWindowIdRef.current = -1;
+      audioStalledRef.current = false;
       lastSnapshotCountRef.current = -1;
       setMaxVolumeDb(-100);
       // 先立起「监测中」标志，writeActiveSnapshot 才会真正落盘
@@ -1081,6 +1116,8 @@ function AppInner() {
         maxVolumeDbRef.current = metering;
         setMaxVolumeDb(metering);
       }
+      // 原生那头发现 WAV 60 秒没长：录音在夜里断过（被系统掐掉/写盘失败）
+      if (result.stalled === true) audioStalledRef.current = true;
 
       const now = Date.now();
       const sessionElapsed = now - startTimeRef.current;
@@ -1095,8 +1132,14 @@ function AppInner() {
       // 帧级分类：打鼾/梦话仍要求是该帧 top 类别；
       // 磨牙放宽为只要置信度超过阈值且高于其它两类事件即可（不必胜过噪音），
       // 因为磨牙通常是短暂的高频摩擦音，很少成为 YAMNet 聚合后的绝对 top。
-      const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold;
-      const isGrindFrame = gConf >= grindThreshold && gConf >= sConf && gConf >= tConf;
+      // 鼾声三道门槛：本帧 top 类别是 snoring、置信度过阈值、音量不能太小。
+      // 加音量门槛是因为远处的电视声/雨声偶尔也会被 YAMNet 判成 snoring，
+      // 但它们到手机时已经很轻；真人打鼾（手机放床头）基本都在 -50dB 以上。
+      const isSnoreFrame = tClass === 'snoring' && sConf >= snoreThreshold && metering >= SNORE_MIN_DB;
+      // 磨牙不再只比三个类别的相对大小：必须是磨牙类声音（或置信度很高）才算，
+      // 否则翻身、呼吸的帧也会被算成磨牙，再把整段事件带成「打鼾」。
+      const isGrindFrame =
+        (tClass === 'grinding' || gConf >= 0.5) && gConf >= sConf && gConf >= tConf;
       const isTalkFrame = tClass === 'talking' && tConf >= talkThreshold;
       const isLoud = isSnoreFrame || isGrindFrame || isTalkFrame;
       // 异常呼吸音（喘息/喘鸣/喷气）不再单独计为事件，但可用来确认一次暂停的结束。
@@ -1180,12 +1223,13 @@ function AppInner() {
     const sessionElapsed = now - startTimeRef.current;
     setElapsedSeconds(Math.floor(sessionElapsed / 1000));
 
-    // Fallback path has no TFLite model, so all loud events are treated as snores.
+    // 兼容模式（模型加载失败）没有 YAMNet，分不清鼾声和别的声音。
+    // 以前这里「响声即鼾声」，于是一整晚的风扇声、翻身声全被记成打鼾 —— 这是明确的误报。
+    // 现在只显示音量，不生成任何声音事件（界面上有「仅检测音量」的提示）。
     const isLoud = metering >= FALLBACK_THRESHOLD_DB;
-    setIsSnoringNow(isLoud);
-    // 兼容模式没有模型可用：响声即视为呼吸声，60 秒时长上限仍能兜住误判
-    trackSilence({ loud: isLoud, breath: isLoud }, sessionElapsed);
-    detectEvent(isLoud, false, false, sessionElapsed, 0);
+    setIsSnoringNow(false);
+    void isLoud;
+    void sessionElapsed;
   };
 
   // 呼吸暂停检测（P0 修复）：判定逻辑收敛到 ApneaTracker，它带三道约束——
@@ -1361,6 +1405,40 @@ function AppInner() {
       // 收尾当前事件
       finalizeCurrentEvent();
 
+      // 默认只留鼾声：把整晚录音裁成「只有打呼噜的片段」，原始文件删掉。
+      // 用户要求过「没打呼噜的别录」——整晚 WAV 里 95% 是安静和翻身声，既占空间也没意义。
+      let recordingMode: 'snore' | 'full' | undefined = uri ? 'full' : undefined;
+      if (uri && useNativeMeterRef.current && AudioMeter && !keepFullRecording) {
+        try {
+          const plan = planSnoreAudio(eventsRef.current);
+          if (plan.ranges.length > 0) {
+            const cut = await AudioMeter.cutSnoreAudio(uri, JSON.stringify(plan.ranges));
+            if (cut) {
+              const offsets = plan.offsets;
+              eventsRef.current = eventsRef.current.map((ev, i) =>
+                offsets[i] >= 0
+                  ? { ...ev, playStart: offsets[i], playEnd: offsets[i] + (ev.end - ev.start) }
+                  : ev
+              );
+              uri = cut;
+              recordingMode = 'snore';
+            }
+          }
+        } catch (e) {
+          console.warn('裁剪鼾声片段失败，保留整晚录音', e);
+        }
+      }
+      // 一晚上一声鼾都没有：整晚录音没有保留价值，直接删掉（不留 1GB 的空白音频）
+      if (uri && !keepFullRecording && eventsRef.current.every((e) => e.type !== 'snore')) {
+        try {
+          await FileSystem.deleteAsync(uri, { idempotent: true });
+        } catch {
+          // ignore
+        }
+        uri = undefined;
+        recordingMode = undefined;
+      }
+
       // 统计口径集中在 summarizeSession（纯函数 + 单元测试），
       // 正常停止与崩溃恢复两条路径共用，避免口径漂移。
       const session = summarizeSession({
@@ -1368,7 +1446,10 @@ function AppInner() {
         endTime,
         events: eventsRef.current,
         recordingUri: uri,
+        recordingMode,
         eventsTruncated: eventsTruncatedRef.current,
+        // 录音线程中途停过：别让用户以为整晚都录到了
+        interrupted: audioStalledRef.current || undefined,
       });
 
       setSessions((prev) => [session, ...prev]);
@@ -1559,19 +1640,25 @@ function AppInner() {
   // 跳转到事件时间点播放
   const seekToEvent = async (evt: SoundEvent) => {
     if (!selectedSession?.recordingUri) return;
+    // 只留鼾声的模式下，磨牙/梦话没有对应音频，不要跳到别的地方去
+    if (selectedSession.recordingMode === 'snore' && evt.playStart === undefined) {
+      Alert.alert('这条没有音频', '录音只保留了鼾声片段，磨牙/梦话没有保存声音。');
+      return;
+    }
     // 手动点事件 = 退出连播：后续按整晚播放进度高亮
     endClipMode();
+    const at = clipStartMs(evt);
     // 若已加载同一录音，直接 seek；否则重新加载
     if (soundRef.current) {
       try {
-        await soundRef.current.setStatusAsync({ positionMillis: evt.start, shouldPlay: true });
+        await soundRef.current.setStatusAsync({ positionMillis: at, shouldPlay: true });
         setIsPlaying(true);
         return;
       } catch (e) {
         console.warn('跳转失败，重新加载', e);
       }
     }
-    await playRecording(selectedSession.recordingUri, evt.start);
+    await playRecording(selectedSession.recordingUri, at);
   };
 
   const stopPlayback = async () => {
@@ -2607,10 +2694,11 @@ function AppInner() {
             <View style={[styles.settingIconCircle, { backgroundColor: `${T.snore}20` }]}>
               <Ionicons name="save-outline" size={20} color={T.snore} />
             </View>
-            <Text style={styles.sectionTitle}>保存整夜录音</Text>
+            <Text style={styles.sectionTitle}>保存录音</Text>
           </View>
           <Text style={styles.settingsDesc}>
-            关闭后不再写入 WAV（整晚约 1GB），鼾声统计照常，但该晚录音无法回放。
+            默认只保存「打呼噜的片段」：每段前后各留一点上下文，没打呼噜的部分直接丢掉，
+            一晚上通常只有几十 MB。关闭后完全不写入音频，鼾声统计照常，但该晚无法回放。
           </Text>
           <View style={styles.segmentRow}>
             {(
@@ -2634,6 +2722,43 @@ function AppInner() {
               );
             })}
           </View>
+
+          {saveRecording && (
+            <>
+              <View style={[styles.settingHeader, { marginTop: 14 }]}>
+                <View style={[styles.settingIconCircle, { backgroundColor: `${T.textSecondary}20` }]}>
+                  <Ionicons name="albums-outline" size={20} color={T.textSecondary} />
+                </View>
+                <Text style={styles.sectionTitle}>保留整晚原始录音</Text>
+              </View>
+              <Text style={styles.settingsDesc}>
+                关掉（推荐）就只留鼾声；打开会额外保留从头到尾的整晚 WAV（约 1GB），
+                连翻身、说话、安静的部分都在里面。
+              </Text>
+              <View style={styles.segmentRow}>
+                {(
+                  [
+                    { key: false, label: '只留鼾声' },
+                    { key: true, label: '留整晚' },
+                  ] as Array<{ key: boolean; label: string }>
+                ).map((opt) => {
+                  const active = keepFullRecording === opt.key;
+                  return (
+                    <TouchableOpacity
+                      key={opt.label}
+                      style={[styles.segmentItem, active && styles.segmentItemActive]}
+                      onPress={() => applyKeepFullPref(opt.key)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          )}
 
           <TouchableOpacity
             style={[styles.actionButton, { backgroundColor: T.warning, marginTop: 12 }]}
