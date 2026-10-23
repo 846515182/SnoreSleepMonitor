@@ -13,7 +13,7 @@ import {
 import type { EpisodeStats } from '../events';
 
 /** 一段「像真打鼾」的统计量：响—停 5 个回合，音量起伏 12dB */
-const snoreShape: EpisodeStats = { meanSnoreConf: 0.7, modulationDb: 12, bursts: 5 };
+const snoreShape: EpisodeStats = { modulationDb: 12, bursts: 5 };
 
 test('classifyIntensity 按置信度分三档', () => {
   assert.equal(classifyIntensity(0.8), 'severe');
@@ -37,7 +37,7 @@ test('打鼾：>= 6 帧、占比 >= 0.6、>= 10 秒、有呼吸包络', () => {
 });
 
 test('稳态噪声（风扇/空调）：置信度高、时间也长，但音量几乎不变 -> 不记', () => {
-  const steady: EpisodeStats = { meanSnoreConf: 0.78, modulationDb: 1.5, bursts: 1 };
+  const steady: EpisodeStats = { modulationDb: 1.5, bursts: 1 };
   const evt = classifyFinalEvent(60_000, { snore: 60, grind: 0, talk: 0, total: 60 }, 0.8, steady);
   assert.equal(evt, null);
 });
@@ -52,14 +52,9 @@ test('打鼾占比 0.55（旧门槛能过）-> 现在不记', () => {
   assert.notEqual(evt?.type, 'snore');
 });
 
-test('平均置信度被拉低（用户把阈值调得太低）-> 不记', () => {
-  const weak: EpisodeStats = { meanSnoreConf: 0.4, modulationDb: 12, bursts: 5 };
-  const evt = classifyFinalEvent(20_000, { snore: 20, grind: 0, talk: 0, total: 20 }, 0.5, weak);
-  assert.equal(evt, null);
-});
 
 test('只有一个回合、又不到 12 秒 -> 不记（多半是一次咳嗽/翻身）', () => {
-  const oneBurst: EpisodeStats = { meanSnoreConf: 0.7, modulationDb: 8, bursts: 1 };
+  const oneBurst: EpisodeStats = { modulationDb: 8, bursts: 1 };
   const evt = classifyFinalEvent(11_000, { snore: 11, grind: 0, talk: 0, total: 11 }, 0.7, oneBurst);
   assert.equal(evt, null, '11 秒的单次爆发不足以判成打鼾');
   const long = classifyFinalEvent(14_000, { snore: 14, grind: 0, talk: 0, total: 14 }, 0.7, oneBurst);

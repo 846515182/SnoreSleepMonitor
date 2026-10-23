@@ -22,8 +22,6 @@ export const MIN_SNORE_MS = 10_000;
 export const MIN_SNORE_FRAMES = 6;
 /** 鼾声帧在「有声帧」里的占比 */
 export const MIN_SNORE_RATIO = 0.6;
-/** 事件内平均鼾声置信度下限：防止用户把阈值调得很低后，一堆 0.3 的噪声混进来 */
-export const MIN_MEAN_SNORE_CONF = 0.55;
 /** 呼吸包络的最小起伏（dB，P90-P10）：稳态风扇/空调约 0–2dB，真人打鼾 10dB 以上 */
 export const MIN_SNORE_MOD_DB = 3;
 /** 至少要几个「响—停」回合；连续不断的长鼾用时长兜底 */
@@ -59,8 +57,6 @@ export interface FrameCounts {
  * 只能靠包络起伏和呼吸回合数来区分。
  */
 export interface EpisodeStats {
-  /** 鼾声帧的平均置信度 */
-  meanSnoreConf: number;
   /** 整段事件（含换气停顿）的音量 P90-P10，dB */
   modulationDb: number;
   /** 连续鼾声帧的段数（响—停回合数） */
@@ -109,7 +105,6 @@ export function classifyFinalEvent(
     counts.snore >= MIN_SNORE_FRAMES &&
     snoreRatio >= MIN_SNORE_RATIO &&
     durationMs >= MIN_SNORE_MS &&
-    stats.meanSnoreConf >= MIN_MEAN_SNORE_CONF &&
     stats.modulationDb >= MIN_SNORE_MOD_DB &&
     (stats.bursts >= MIN_SNORE_BURSTS || durationMs >= MIN_CONTINUOUS_SNORE_MS);
 

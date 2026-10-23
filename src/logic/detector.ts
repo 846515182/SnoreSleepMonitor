@@ -17,6 +17,17 @@ import { classifyFinalEvent, GRACE_MS, percentile } from './events';
  */
 export const MAX_FRAME_GAP_MS = 5000;
 
+/**
+ * 低于这个音量的帧不参与包络统计。
+ * 原生层在推理失败/完全无声时会给出 -100 这个哨兵值，如果把它算进去，
+ * 任何一段声音的 P90-P10 都会被撑大，稳态噪声反而能混过「音量起伏」检查。
+ */
+const MOD_DB_FLOOR = -90;
+
+function pushDb(draft: { dbs: number[] }, db: number): void {
+  if (Number.isFinite(db) && db > MOD_DB_FLOOR) draft.dbs.push(db);
+}
+
 interface Draft {
   start: number;
   end: number;
@@ -25,7 +36,6 @@ interface Draft {
   talkFrames: number;
   totalFrames: number;
   maxSnoreConf: number;
-  snoreConfSum: number;
   /** 事件期间每一帧的音量（含换气停顿），用于算包络起伏 */
   dbs: number[];
   /** 连续的鼾声帧算一个回合 */
@@ -63,7 +73,7 @@ export class SoundEventDetector {
    * 喂一帧。
    * @param elapsedMs 会话相对毫秒（单调递增）
    * @param frame 本帧的分类结果
-   * @param snoreConf 本帧鼾声置信度（用于强度分级与平均置信度）
+   * @param snoreConf 本帧鼾声置信度（用于强度分级）
    * @param db 本帧音量（dBFS），用于判断呼吸包络
    * @returns 本帧导致事件落定时返回该事件，否则 null
    */
@@ -95,7 +105,6 @@ export class SoundEventDetector {
           talkFrames: 0,
           totalFrames: 0,
           maxSnoreConf: 0,
-          snoreConfSum: 0,
           dbs: [],
           bursts: 0,
           lastWasSnore: false,
@@ -104,10 +113,9 @@ export class SoundEventDetector {
       const d = this.draft;
       d.end = t;
       d.totalFrames += 1;
-      d.dbs.push(db);
+      pushDb(d, db);
       if (frame.snore) {
         d.snoreFrames += 1;
-        d.snoreConfSum += snoreConf;
         if (snoreConf > d.maxSnoreConf) d.maxSnoreConf = snoreConf;
         if (!d.lastWasSnore) d.bursts += 1;
         d.lastWasSnore = true;
@@ -118,7 +126,7 @@ export class SoundEventDetector {
       if (frame.talk) d.talkFrames += 1;
     } else if (this.draft) {
       // 静音帧也纳入包络统计（真人鼾声之间就是 1–2 秒的换气停顿）
-      this.draft.dbs.push(db);
+      pushDb(this.draft, db);
       if (t - this.lastLoudMs >= GRACE_MS) {
         finalized = this.finalize();
       }
@@ -148,7 +156,6 @@ export class SoundEventDetector {
       },
       d.maxSnoreConf,
       {
-        meanSnoreConf: d.snoreFrames > 0 ? d.snoreConfSum / d.snoreFrames : 0,
         modulationDb: percentile(d.dbs, 0.9) - percentile(d.dbs, 0.1),
         bursts: d.bursts,
       }

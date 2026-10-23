@@ -19,6 +19,7 @@ import type { FrameInput, Thresholds } from '../frame';
 import { SoundEventDetector } from '../detector';
 import { ApneaTracker } from '../apnea';
 import { summarizeSession } from '../session';
+import { clipWindow, planEventAudio } from '../clips';
 import type { ApneaEvent } from '../apnea';
 import type { SoundEvent } from '../../types';
 
@@ -41,7 +42,10 @@ type Scene =
   | 'straySnore'
   | 'grind'
   | 'fan'
-  | 'steadyFan';
+  | 'steadyFan'
+  | 'noisySnore'
+  | 'continuousSnore'
+  | 'lowConfSnore';
 
 /**
  * 单帧内容。
@@ -74,6 +78,22 @@ function frameAt(scene: Scene, i: number): FrameInput {
     case 'steadyFan':
       // 风扇：YAMNet 给出 0.62 的 snoring，但音量一点起伏都没有
       return { topClass: 'snoring', confidences: { snoring: 0.62, noise: 0.3 }, amplitudeDb: -40 };
+    case 'noisySnore':
+      // 房间里一直有 -40dB 的风扇底噪，真人鼾声 -35dB：起伏只剩 5dB，但仍然是呼吸节奏
+      return i % 4 < 2
+        ? { topClass: 'snoring', confidences: { snoring: 0.7, noise: 0.2 }, amplitudeDb: -35 }
+        : { topClass: 'noise', confidences: { noise: 0.85, snoring: 0.1 }, amplitudeDb: -40 };
+    case 'continuousSnore':
+      // 没有明显停顿的长鼾，但每个呼吸仍有约 5dB 起伏
+      return {
+        topClass: 'snoring',
+        confidences: { snoring: 0.7, noise: 0.1 },
+        amplitudeDb: i % 2 === 0 ? -34 : -39,
+      };
+    case 'lowConfSnore':
+      return i % 4 < 2
+        ? { topClass: 'snoring', confidences: { snoring: 0.4, noise: 0.3 }, amplitudeDb: -38 }
+        : { topClass: 'noise', confidences: { noise: 0.7 }, amplitudeDb: -55 };
     case 'fan':
       return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 };
     case 'quiet':
@@ -102,7 +122,7 @@ function buildNight(script: Array<[Scene, number]>): Frame[] {
 }
 
 /** 与 App.tsx 的 applyNativeResult 同序执行：分类 → 暂停 → 事件状态机 */
-function runNight(frames: Frame[], minSilenceMs = 15_000) {
+function runNight(frames: Frame[], minSilenceMs = 15_000, th: Thresholds = TH) {
   const detector = new SoundEventDetector();
   const apnea = new ApneaTracker({ minSilenceMs });
   const events: SoundEvent[] = [];
@@ -110,7 +130,7 @@ function runNight(frames: Frame[], minSilenceMs = 15_000) {
 
   for (const f of frames) {
     const input = frameAt(f.scene, f.index);
-    const flags = classifyFrame(input, TH);
+    const flags = classifyFrame(input, th);
     const ap = apnea.onFrame(f.t, {
       loud: flags.loud || flags.apneaSound,
       breath: flags.breath,
@@ -247,4 +267,77 @@ test('八小时长跑：72 段打鼾全部记到，且没有跨分钟假事件',
 
   const totalMinutes = events.reduce((sum, e) => sum + e.duration, 0) / 60000;
   assert.ok(totalMinutes >= 40 && totalMinutes <= 55, `鼾声总时长应约 48 分钟，实际 ${totalMinutes.toFixed(1)}`);
+});
+
+test('嘈杂房间：-40dB 风扇底噪下的鼾声仍能记到（起伏被压缩到 5dB）', () => {
+  const { events } = runNight(buildNight([['noisySnore', 30]]));
+  assert.equal(events.filter((e) => e.type === 'snore').length, 1);
+});
+
+test('连续长鼾（没有换气停顿）20 秒仍然记 1 条', () => {
+  const { events } = runNight(buildNight([['continuousSnore', 20]]));
+  assert.equal(events.filter((e) => e.type === 'snore').length, 1);
+});
+
+test('鼾声阈值滑块双向生效：调低能收到 0.40 的轻声鼾，调高会滤掉 0.72 的鼾声', () => {
+  const frames = buildNight([['snore', 30]]);
+  const low = runNight(frames, 15_000, { ...TH, snore: 0.35 });
+  assert.equal(low.events.filter((e) => e.type === 'snore').length, 1, '阈值 0.35 应能收到 0.72 的鼾声');
+
+  const high = runNight(frames, 15_000, { ...TH, snore: 0.8 });
+  assert.equal(high.events.filter((e) => e.type === 'snore').length, 0, '阈值 0.8 应滤掉 0.72 的鼾声');
+
+  const lowConf = buildNight([['lowConfSnore', 30]]);
+  assert.equal(
+    runNight(lowConf, 15_000, { ...TH, snore: 0.35 }).events.filter((e) => e.type === 'snore').length,
+    1,
+    '阈值调低后 0.40 的鼾声要能记到（不能被写死的平均置信度门槛挡掉）'
+  );
+  assert.equal(
+    runNight(lowConf).events.filter((e) => e.type === 'snore').length,
+    0,
+    '默认 0.55 时 0.40 不该记'
+  );
+});
+
+test('整晚跑完后裁剪：鼾声/梦话/磨牙都有音频，暂停明确没有', () => {
+  const { events } = runNight(
+    buildNight([
+      ['quiet', 20],
+      ['snore', 30],
+      ['quiet', 10],
+      ['talk', 8],
+      ['quiet', 10],
+      ['grind', 2],
+      ['quiet', 10],
+      ['apneaSilence', 15],
+      ['snore', 20],
+      ['quiet', 10],
+    ])
+  );
+  const plan = planEventAudio(events);
+  assert.ok(plan.ranges.length >= 3, '至少应有鼾声/梦话/磨牙三段音频');
+  assert.ok(plan.totalMs > 30_000);
+
+  const audioEvents = events.filter((e) => e.type !== 'apnea');
+  assert.ok(audioEvents.length >= 3);
+
+  // 与 App.tsx 停止后的映射保持一致
+  const cut = events.map((ev, i) =>
+    plan.offsets[i] >= 0
+      ? { ...ev, playStart: plan.offsets[i], playEnd: plan.offsets[i] + (ev.end - ev.start) }
+      : ev
+  );
+
+  cut.forEach((ev) => {
+    if (ev.type === 'apnea') {
+      assert.equal(ev.playStart, undefined, '暂停是无声段，不应有音频');
+      return;
+    }
+    assert.ok(typeof ev.playStart === 'number' && ev.playStart >= 0, `${ev.type} 应该有可播放起点`);
+    assert.ok((ev.playEnd ?? 0) > (ev.playStart ?? 0), `${ev.type} 的播放区间必须非空`);
+    const w = clipWindow(ev, plan.totalMs);
+    assert.ok(w.end > w.start);
+    assert.ok(w.end <= plan.totalMs + 1);
+  });
 });

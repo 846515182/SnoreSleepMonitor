@@ -72,3 +72,19 @@ test('断帧超过上限时先落定上一段，不会把空白并进来', () =>
   assert.ok((late[0]?.duration ?? 0) < 30_000);
   assert.equal(det.flush()?.type, 'snore');
 });
+
+test('推理失败的 -100dB 哨兵值不能撑大音量起伏', () => {
+  const det = new SoundEventDetector();
+  for (let i = 0; i < 40; i += 1) {
+    det.push(i * FRAME, snore, 0.78, i === 10 ? -100 : SNORE_DB);
+  }
+  assert.equal(det.flush(), null, '稳态噪声混进一个 -100dB 错误帧，仍然不能判成打鼾');
+});
+
+test('风扇那种 2dB 以内的微小起伏，仍然不认', () => {
+  const det = new SoundEventDetector();
+  for (let i = 0; i < 40; i += 1) {
+    det.push(i * FRAME, snore, 0.7, i % 2 === 0 ? -40 : -42);
+  }
+  assert.equal(det.flush(), null);
+});
