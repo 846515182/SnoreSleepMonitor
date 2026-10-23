@@ -93,7 +93,7 @@ const ACTIVE_SNAPSHOT_TICKS = 100;
 /** 详情页最多渲染的事件条数：整晚可能上千条，全量渲染会严重卡顿 */
 const MAX_VISIBLE_EVENTS = 200;
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
-const DEFAULT_APNEA_CONFIDENCE = 0.1; // 默认呼吸暂停判定：连续无声 10 秒（滑块 0.1–0.9 映射 10–30 秒）
+const DEFAULT_APNEA_CONFIDENCE = 0.3; // 默认呼吸暂停判定：连续无声 15 秒（滑块 0.1–0.9 映射 10–30 秒）
 const FALLBACK_THRESHOLD_DB = -60; // expo-av 回退方案音量阈值
 const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WAV 约 115MB/小时，避免撑爆存储）
 const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
@@ -115,7 +115,7 @@ const THRESHOLD_TABS: Array<{ key: ThresholdTab; label: string; desc: string }> 
   {
     key: 'apnea',
     label: '暂停',
-    desc: '连续无声超过该时长、随后由鼾声或呼吸声收口时判为一次疑似暂停（10–30 秒，推荐 10–15 秒）。仅供参考，不构成医疗诊断。',
+    desc: '连续无声超过该时长、随后由鼾声或呼吸声收口时判为一次疑似暂停（10–30 秒，默认 15 秒）。仅供参考，不构成医疗诊断。',
   },
 ];
 
@@ -1137,7 +1137,7 @@ function AppInner() {
       // loud = 任意事件帧，用于锚定静音起点；
       // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
       trackSilence({ loud: flags.loud || flags.apneaSound, breath: flags.breath }, sessionElapsed);
-      const finished = detectorRef.current.push(sessionElapsed, flags, sConf);
+      const finished = detectorRef.current.push(sessionElapsed, flags, sConf, metering);
       if (finished) recordEvent(finished);
       updateNoiseTotals();
 

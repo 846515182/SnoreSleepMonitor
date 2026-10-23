@@ -1,12 +1,14 @@
 /**
  * 声音事件状态机 —— 纯逻辑，可在电脑上喂「模拟的一整晚」做回归。
  *
- * 之前这套逻辑写在 App.tsx 里，只能靠人肉读；现在抽出来，
- * 单元测试里可以按 0.975 秒一帧喂真实节奏的鼾声/梦话/暂停，断言事件数。
+ * 除了帧数/占比，这里还收集两个决定「是不是真鼾声」的量：
+ *   - 整段事件的音量起伏（P90-P10）：稳态噪声几乎没有起伏；
+ *   - 连续鼾声帧的段数（响—停回合）：真人打鼾是跟着呼吸一截一截的。
+ * 判定在 classifyFinalEvent 里，测试覆盖了风扇/电视/翻身/单帧误触等噪声场景。
  */
 
 import type { SoundEvent } from '../types';
-import { classifyFinalEvent, GRACE_MS } from './events';
+import { classifyFinalEvent, GRACE_MS, percentile } from './events';
 
 /**
  * 两帧之间超过这个间隔就认为中间断过（锁屏定时器被暂停、应用被冻结、
@@ -23,6 +25,12 @@ interface Draft {
   talkFrames: number;
   totalFrames: number;
   maxSnoreConf: number;
+  snoreConfSum: number;
+  /** 事件期间每一帧的音量（含换气停顿），用于算包络起伏 */
+  dbs: number[];
+  /** 连续的鼾声帧算一个回合 */
+  bursts: number;
+  lastWasSnore: boolean;
 }
 
 export interface DetectorFrame {
@@ -55,10 +63,16 @@ export class SoundEventDetector {
    * 喂一帧。
    * @param elapsedMs 会话相对毫秒（单调递增）
    * @param frame 本帧的分类结果
-   * @param snoreConf 本帧鼾声置信度（用于强度分级）
+   * @param snoreConf 本帧鼾声置信度（用于强度分级与平均置信度）
+   * @param db 本帧音量（dBFS），用于判断呼吸包络
    * @returns 本帧导致事件落定时返回该事件，否则 null
    */
-  push(elapsedMs: number, frame: DetectorFrame, snoreConf: number): SoundEvent | null {
+  push(
+    elapsedMs: number,
+    frame: DetectorFrame,
+    snoreConf: number,
+    db: number
+  ): SoundEvent | null {
     // 时钟回拨/时间戳异常：按上一帧处理，避免负时长
     const t = Math.max(elapsedMs, this.lastFrameMs);
     this.lastFrameMs = t;
@@ -81,20 +95,33 @@ export class SoundEventDetector {
           talkFrames: 0,
           totalFrames: 0,
           maxSnoreConf: 0,
+          snoreConfSum: 0,
+          dbs: [],
+          bursts: 0,
+          lastWasSnore: false,
         };
       }
       const d = this.draft;
       d.end = t;
       d.totalFrames += 1;
+      d.dbs.push(db);
       if (frame.snore) {
         d.snoreFrames += 1;
+        d.snoreConfSum += snoreConf;
         if (snoreConf > d.maxSnoreConf) d.maxSnoreConf = snoreConf;
+        if (!d.lastWasSnore) d.bursts += 1;
+        d.lastWasSnore = true;
+      } else {
+        d.lastWasSnore = false;
       }
       if (frame.grind) d.grindFrames += 1;
       if (frame.talk) d.talkFrames += 1;
-    } else if (this.draft && t - this.lastLoudMs >= GRACE_MS) {
-      // 静音超过宽限期才收尾：鼾声的呼吸间隔（1–2 秒）不会把一次打鼾拆成好几条
-      finalized = this.finalize();
+    } else if (this.draft) {
+      // 静音帧也纳入包络统计（真人鼾声之间就是 1–2 秒的换气停顿）
+      this.draft.dbs.push(db);
+      if (t - this.lastLoudMs >= GRACE_MS) {
+        finalized = this.finalize();
+      }
     }
 
     return finalized;
@@ -119,7 +146,12 @@ export class SoundEventDetector {
         talk: d.talkFrames,
         total: d.totalFrames,
       },
-      d.maxSnoreConf
+      d.maxSnoreConf,
+      {
+        meanSnoreConf: d.snoreFrames > 0 ? d.snoreConfSum / d.snoreFrames : 0,
+        modulationDb: percentile(d.dbs, 0.9) - percentile(d.dbs, 0.1),
+        bursts: d.bursts,
+      }
     );
     if (!classified) return null;
 

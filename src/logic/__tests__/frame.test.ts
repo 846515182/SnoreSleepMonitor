@@ -53,9 +53,9 @@ test('鼾声三门槛：top 类别 + 置信度 + 音量', () => {
 });
 
 test('磨牙阈值设置真的生效（此前是死参数）', () => {
-  const frame = { topClass: 'grinding', confidences: { grinding: 0.3, noise: 0.4 }, amplitudeDb: -45 };
-  assert.equal(classifyFrame(frame, TH).grind, true, '0.3 >= 默认 0.25 应命中');
-  assert.equal(classifyFrame(frame, { ...TH, grind: 0.4 }).grind, false, '调到 0.4 后应不再命中');
+  const frame = { topClass: 'grinding', confidences: { grinding: 0.45, noise: 0.4 }, amplitudeDb: -45 };
+  assert.equal(classifyFrame(frame, TH).grind, true, '0.45 >= 默认 0.4 应命中');
+  assert.equal(classifyFrame(frame, { ...TH, grind: 0.55 }).grind, false, '调到 0.55 后应不再命中');
 
   // 不是 grinding 类、置信度也不够高：不能靠“比另外两类大”混进来
   assert.equal(

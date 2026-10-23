@@ -6,15 +6,15 @@
  */
 
 /** 鼾声的最低音量（dBFS）：太轻的声音不可能是一个人躺在手机旁边打鼾 */
-export const SNORE_MIN_DB = -50;
+export const SNORE_MIN_DB = -48;
 
 /** YAMNet 异常呼吸音（喘息/喘鸣/喷气）置信度：只用于确认一次暂停结束 */
 export const APNEA_SOUND_CONF = 0.45;
 
 /** 默认阈值（设置页可调） */
-export const DEFAULT_SNORE_CONFIDENCE = 0.45;
-export const DEFAULT_GRIND_CONFIDENCE = 0.25;
-export const DEFAULT_TALK_CONFIDENCE = 0.5;
+export const DEFAULT_SNORE_CONFIDENCE = 0.55;
+export const DEFAULT_GRIND_CONFIDENCE = 0.4;
+export const DEFAULT_TALK_CONFIDENCE = 0.55;
 
 export interface FrameInput {
   /** YAMNet 聚合后的 top 类别：snoring / grinding / talking / apnea / noise */
