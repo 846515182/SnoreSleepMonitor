@@ -45,7 +45,9 @@ type Scene =
   | 'steadyFan'
   | 'noisySnore'
   | 'continuousSnore'
-  | 'lowConfSnore';
+  | 'lowConfSnore'
+  | 'fakeSnore'
+  | 'snoreLoose';
 
 /**
  * 单帧内容。
@@ -87,13 +89,21 @@ function frameAt(scene: Scene, i: number): FrameInput {
       // 没有明显停顿的长鼾，但每个呼吸仍有约 5dB 起伏
       return {
         topClass: 'snoring',
-        confidences: { snoring: 0.7, noise: 0.1 },
+        confidences: { snoring: 0.78, noise: 0.1 },
         amplitudeDb: i % 2 === 0 ? -34 : -39,
       };
     case 'lowConfSnore':
       return i % 4 < 2
         ? { topClass: 'snoring', confidences: { snoring: 0.4, noise: 0.3 }, amplitudeDb: -38 }
         : { topClass: 'noise', confidences: { noise: 0.7 }, amplitudeDb: -55 };
+    case 'fakeSnore':
+      // 对着手机假装打呼噜：一直响、音量几乎不变、置信度 0.80
+      return { topClass: 'snoring', confidences: { snoring: 0.8, noise: 0.1 }, amplitudeDb: -36 };
+    case 'snoreLoose':
+      // 假装打鼾的人换气更久：响 2 帧、停 4 帧（约 3.9 秒）
+      return i % 6 < 2
+        ? { topClass: 'snoring', confidences: { snoring: 0.72, noise: 0.1 }, amplitudeDb: -34 }
+        : { topClass: 'noise', confidences: { noise: 0.7 }, amplitudeDb: -58 };
     case 'fan':
       return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 };
     case 'quiet':
@@ -340,4 +350,16 @@ test('整晚跑完后裁剪：鼾声/梦话/磨牙都有音频，暂停明确没
     assert.ok(w.end > w.start);
     assert.ok(w.end <= plan.totalMs + 1);
   });
+});
+
+test('假装打呼噜：8 秒连续不断、音量不变的鼾声要记到', () => {
+  const { events } = runNight(buildNight([['fakeSnore', 8]]));
+  assert.equal(events.filter((e) => e.type === 'snore').length, 1);
+});
+
+test('假装打呼噜时每次换气停 4 秒：不会被拆成碎片', () => {
+  const { events } = runNight(buildNight([['snoreLoose', 24]]));
+  const snores = events.filter((e) => e.type === 'snore');
+  assert.equal(snores.length, 1, '4 秒换气停顿要跨过去，不能拆成好几条');
+  assert.ok((snores[0]?.duration ?? 0) >= 10_000);
 });

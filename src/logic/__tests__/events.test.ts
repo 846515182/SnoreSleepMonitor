@@ -30,15 +30,28 @@ test('percentile：中位数与边界', () => {
   assert.equal(percentile([], 0.5), 0);
 });
 
-test('打鼾：>= 6 帧、占比 >= 0.6、>= 10 秒、有呼吸包络', () => {
+test('打鼾：>= 4 帧、占比 >= 0.6、>= 5 秒、有呼吸包络', () => {
   const evt = classifyFinalEvent(20_000, { snore: 20, grind: 2, talk: 1, total: 25 }, 0.8, snoreShape);
   assert.equal(evt?.type, 'snore');
   assert.equal(evt?.intensity, 'severe');
 });
 
-test('稳态噪声（风扇/空调）：置信度高、时间也长，但音量几乎不变 -> 不记', () => {
+test('长于 45 秒的稳态噪声（风扇/空调）：置信度再高也不记', () => {
   const steady: EpisodeStats = { modulationDb: 1.5, bursts: 1 };
   const evt = classifyFinalEvent(60_000, { snore: 60, grind: 0, talk: 0, total: 60 }, 0.8, steady);
+  assert.equal(evt, null);
+});
+
+test('假装打呼噜：10 秒几乎不变的连续鼾声（0.78）要记到', () => {
+  const steadyShort: EpisodeStats = { modulationDb: 0.8, bursts: 1 };
+  const evt = classifyFinalEvent(10_000, { snore: 10, grind: 0, talk: 0, total: 10 }, 0.78, steadyShort);
+  assert.equal(evt?.type, 'snore');
+  assert.equal(evt?.intensity, 'severe');
+});
+
+test('同样的连续声音只有 0.70 置信度 -> 不记', () => {
+  const steadyShort: EpisodeStats = { modulationDb: 0.8, bursts: 1 };
+  const evt = classifyFinalEvent(10_000, { snore: 10, grind: 0, talk: 0, total: 10 }, 0.7, steadyShort);
   assert.equal(evt, null);
 });
 
@@ -53,12 +66,23 @@ test('打鼾占比 0.55（旧门槛能过）-> 现在不记', () => {
 });
 
 
-test('只有一个回合、又不到 12 秒 -> 不记（多半是一次咳嗽/翻身）', () => {
+test('一口气到底的连续鼾：45 秒以内且置信度 >= 0.75 才认', () => {
   const oneBurst: EpisodeStats = { modulationDb: 8, bursts: 1 };
-  const evt = classifyFinalEvent(11_000, { snore: 11, grind: 0, talk: 0, total: 11 }, 0.7, oneBurst);
-  assert.equal(evt, null, '11 秒的单次爆发不足以判成打鼾');
-  const long = classifyFinalEvent(14_000, { snore: 14, grind: 0, talk: 0, total: 14 }, 0.7, oneBurst);
-  assert.equal(long?.type, 'snore', '连续 14 秒可以认');
+  assert.equal(
+    classifyFinalEvent(11_000, { snore: 11, grind: 0, talk: 0, total: 11 }, 0.7, oneBurst),
+    null,
+    '只有 0.70，不足以在没有呼吸回合时单独定案'
+  );
+  assert.equal(
+    classifyFinalEvent(11_000, { snore: 11, grind: 0, talk: 0, total: 11 }, 0.8, oneBurst)?.type,
+    'snore',
+    '11 秒、0.80 的连续鼾声要认'
+  );
+  assert.equal(
+    classifyFinalEvent(60_000, { snore: 60, grind: 0, talk: 0, total: 60 }, 0.9, oneBurst),
+    null,
+    '超过 45 秒的稳态声音不能靠置信度硬闯'
+  );
 });
 
 test('打鼾时长不足 -> 丢弃', () => {

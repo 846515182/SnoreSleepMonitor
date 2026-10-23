@@ -35,20 +35,19 @@ test('单帧误触：flush 也不会生成事件', () => {
   assert.equal(det.flush(), null);
 });
 
-test('4 个呼吸周期（8 帧鼾声、约 12.7 秒）才算一条', () => {
-  const det = new SoundEventDetector();
-  feedCycles(det, 0, 3);
-  assert.equal(det.flush(), null, '3 个周期（6 帧、不到 10 秒）不够');
+test('3 个呼吸周期（6 帧、约 8.8 秒）起记，2 个周期（3.9 秒）不够', () => {
+  const two = new SoundEventDetector();
+  feedCycles(two, 0, 2);
+  assert.equal(two.flush(), null, '2 个周期只有 3.9 秒，不到 5 秒');
 
-  const det2 = new SoundEventDetector();
-  feedCycles(det2, 0, 4);
-  const evt = det2.flush();
-  assert.equal(evt?.type, 'snore');
+  const three = new SoundEventDetector();
+  feedCycles(three, 0, 3);
+  assert.equal(three.flush()?.type, 'snore');
 });
 
-test('稳态噪声：音量一直 -34dB、置信度也高，但不认（没有呼吸包络）', () => {
+test('稳态噪声：连续响 57 秒、置信度 0.78，也不认（没有呼吸回合）', () => {
   const det = new SoundEventDetector();
-  for (let i = 0; i < 40; i += 1) {
+  for (let i = 0; i < 60; i += 1) {
     const e = det.push(i * FRAME, snore, 0.78, SNORE_DB);
     assert.equal(e, null);
   }
@@ -74,11 +73,21 @@ test('断帧超过上限时先落定上一段，不会把空白并进来', () =>
 });
 
 test('推理失败的 -100dB 哨兵值不能撑大音量起伏', () => {
-  const det = new SoundEventDetector();
-  for (let i = 0; i < 40; i += 1) {
-    det.push(i * FRAME, snore, 0.78, i === 10 ? -100 : SNORE_DB);
+  // 2dB 起伏 + 0.70 置信度：本来就不该认
+  const clean = new SoundEventDetector();
+  for (let i = 0; i < 24; i += 1) {
+    const on = i % 4 < 2;
+    clean.push(i * FRAME, on ? snore : quiet, on ? 0.7 : 0.1, on ? -40 : -42);
   }
-  assert.equal(det.flush(), null, '稳态噪声混进一个 -100dB 错误帧，仍然不能判成打鼾');
+  assert.equal(clean.flush(), null);
+
+  // 混进一个 -100dB 哨兵：如果把它算进包络，起伏会被撑到 60dB，反而通过
+  const dirty = new SoundEventDetector();
+  for (let i = 0; i < 24; i += 1) {
+    const on = i % 4 < 2;
+    dirty.push(i * FRAME, on ? snore : quiet, on ? 0.7 : 0.1, i === 6 ? -100 : on ? -40 : -42);
+  }
+  assert.equal(dirty.flush(), null, '哨兵值不能把稳态噪声抬成打鼾');
 });
 
 test('风扇那种 2dB 以内的微小起伏，仍然不认', () => {

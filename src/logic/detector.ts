@@ -125,6 +125,8 @@ export class SoundEventDetector {
       if (frame.grind) d.grindFrames += 1;
       if (frame.talk) d.talkFrames += 1;
     } else if (this.draft) {
+      // 换气/静音帧也是一个「响—停」回合的结束
+      this.draft.lastWasSnore = false;
       // 静音帧也纳入包络统计（真人鼾声之间就是 1–2 秒的换气停顿）
       pushDb(this.draft, db);
       if (t - this.lastLoudMs >= GRACE_MS) {

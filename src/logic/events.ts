@@ -16,18 +16,25 @@
 export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
-/** 一段「打鼾」至少持续 10 秒：真人打鼾是按分钟算的，几秒钟的响声基本都是翻身/咳嗽/环境音 */
-export const MIN_SNORE_MS = 10_000;
-/** 至少 6 帧被判成鼾声（0.975 秒一帧），约 3 个呼吸周期 */
-export const MIN_SNORE_FRAMES = 6;
+/** 一段「打鼾」至少持续 5 秒：再短就分不清是咳嗽/翻身还是真的一口鼾 */
+export const MIN_SNORE_MS = 5_000;
+/** 至少 4 帧被判成鼾声（0.975 秒一帧） */
+export const MIN_SNORE_FRAMES = 4;
 /** 鼾声帧在「有声帧」里的占比 */
 export const MIN_SNORE_RATIO = 0.6;
-/** 呼吸包络的最小起伏（dB，P90-P10）：稳态风扇/空调约 0–2dB，真人打鼾 10dB 以上 */
-export const MIN_SNORE_MOD_DB = 3;
-/** 至少要几个「响—停」回合；连续不断的长鼾用时长兜底 */
+/** 呼吸包络的最小起伏（dB，P90-P10）：稳态风扇/空调约 0–2dB，真人打鼾 6dB 以上 */
+export const MIN_SNORE_MOD_DB = 2.5;
+/** 至少要几个「响—停」回合 */
 export const MIN_SNORE_BURSTS = 2;
-/** 连续（没有明显停顿）时，至少这么长才认 */
-export const MIN_CONTINUOUS_SNORE_MS = 12_000;
+/**
+ * 一次连续到底、几乎没有停顿的鼾声（比如对着手机憋一口气「嘶——」）：
+ * 没有呼吸回合可数，只能靠「短 + 高置信度」放行。
+ * 上限 45 秒是故意的：风扇/空调会连续响一整晚，不能靠这一条混进来；
+ * 而人憋一口气也不可能连续「鼾」45 秒，超过这个长度必然有换气停顿。
+ */
+export const STEADY_SNORE_MS = 45_000;
+export const STEADY_SNORE_CONF = 0.75;
+export const STEADY_SNORE_RATIO = 0.75;
 
 export const MIN_GRIND_MS = 300; // 最小磨牙持续时间 0.3 秒
 export const MAX_GRIND_MS = 1500; // 磨牙事件一般不超过 1.5 秒
@@ -40,9 +47,10 @@ export const MIN_TALK_RATIO = 0.6; // 梦话帧占比门槛
  * YAMNet 一帧 0.975 秒，真人打鼾通常是「响 1–2 秒 + 停 1–2 秒」，
  * 原来的 700ms 意味着只要出现一帧换气就收尾，2 帧的碎片全部达不到帧数门槛，
  * 结果是整晚一条鼾声都记不到（已用整晚模拟复现）。
- * 3000ms 可以跨过 1–3 帧换气，又不会把半分钟后的另一段声音并进来。
+ * 5000ms 可以跨过 2–5 帧换气（真人换气、以及故意「假装打鼾」时较长的停顿），
+ * 又不会把半分钟后的另一段声音并进来。
  */
-export const GRACE_MS = 3000;
+export const GRACE_MS = 5000;
 
 export interface FrameCounts {
   snore: number;
@@ -101,14 +109,23 @@ export function classifyFinalEvent(
   const grindRatio = total > 0 ? counts.grind / total : 0;
   const talkRatio = total > 0 ? counts.talk / total : 0;
 
-  const hasSnoreShape =
+  const enoughSnore =
     counts.snore >= MIN_SNORE_FRAMES &&
     snoreRatio >= MIN_SNORE_RATIO &&
-    durationMs >= MIN_SNORE_MS &&
-    stats.modulationDb >= MIN_SNORE_MOD_DB &&
-    (stats.bursts >= MIN_SNORE_BURSTS || durationMs >= MIN_CONTINUOUS_SNORE_MS);
+    durationMs >= MIN_SNORE_MS;
 
-  if (hasSnoreShape) {
+  // 正常打鼾：跟着呼吸一截一截，音量有明显起伏
+  const hasBreathStructure =
+    enoughSnore && stats.modulationDb >= MIN_SNORE_MOD_DB && stats.bursts >= MIN_SNORE_BURSTS;
+
+  // 一口气到底的连续鼾：没有回合可数，用「不超过 45 秒 + 高置信度」兜底
+  const steadyButConfident =
+    enoughSnore &&
+    durationMs <= STEADY_SNORE_MS &&
+    snoreRatio >= STEADY_SNORE_RATIO &&
+    maxSnoreConf >= STEADY_SNORE_CONF;
+
+  if (hasBreathStructure || steadyButConfident) {
     return { type: 'snore', intensity: classifyIntensity(maxSnoreConf) };
   }
   if (talkRatio >= MIN_TALK_RATIO && durationMs >= MIN_TALK_MS) {
