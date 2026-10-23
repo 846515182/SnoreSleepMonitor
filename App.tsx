@@ -32,7 +32,7 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
-import { clipFinished, clipStartMs, planSnoreAudio, selectSnoreClips } from './src/logic/clips';
+import { clipFinished, clipStartMs, planEventAudio, selectSnoreClips } from './src/logic/clips';
 import { classifyIntensity } from './src/logic/events';
 import {
   classifyFrame,
@@ -212,7 +212,7 @@ function AppInner() {
   const [apneaThreshold, setApneaThreshold] = useState(DEFAULT_APNEA_CONFIDENCE);
   // 是否录音：默认录完整晚再裁成鼾声片段；关闭后只识别、不写盘
   const [saveRecording, setSaveRecording] = useState(true);
-  /** 是否连没打呼噜的部分也留着（默认只留鼾声片段，省空间也不占隐私） */
+  /** 是否连安静的部分也留着（默认只留有声音的片段，省空间也不占隐私） */
   const [keepFullRecording, setKeepFullRecording] = useState(false);
   const [snoreConfidence, setSnoreConfidence] = useState(0);
   const [grindConfidence, setGrindConfidence] = useState(0);
@@ -803,7 +803,7 @@ function AppInner() {
     }
   };
 
-  /** 切换「保留整晚原始录音」：默认只留鼾声片段 */
+  /** 切换「保留整晚原始录音」：默认只留有声音的片段 */
   const applyKeepFullPref = async (value: boolean) => {
     setKeepFullRecording(value);
     try {
@@ -1314,12 +1314,12 @@ function AppInner() {
       const lastEvent = detectorRef.current.flush();
       if (lastEvent) recordEvent(lastEvent);
 
-      // 默认只留鼾声：把整晚录音裁成「只有打呼噜的片段」，原始文件删掉。
-      // 用户要求过「没打呼噜的别录」——整晚 WAV 里 95% 是安静和翻身声，既占空间也没意义。
+      // 默认只留有声音的片段：把整晚录音裁成「鼾声 + 梦话 + 磨牙」，原始文件删掉。
+      // 只裁鼾声会让梦话/磨牙在报告里有点击播放按钮却没有声音（用户实测反馈）。
       let recordingMode: 'snore' | 'full' | undefined = uri ? 'full' : undefined;
       if (uri && useNativeMeterRef.current && AudioMeter && !keepFullRecording) {
         try {
-          const plan = planSnoreAudio(eventsRef.current);
+          const plan = planEventAudio(eventsRef.current);
           if (plan.ranges.length > 0) {
             const cut = await AudioMeter.cutSnoreAudio(uri, JSON.stringify(plan.ranges));
             if (cut) {
@@ -1334,11 +1334,11 @@ function AppInner() {
             }
           }
         } catch (e) {
-          console.warn('裁剪鼾声片段失败，保留整晚录音', e);
+          console.warn('裁剪有声片段失败，保留整晚录音', e);
         }
       }
-      // 一晚上一声鼾都没有：整晚录音没有保留价值，直接删掉（不留 1GB 的空白音频）
-      if (uri && !keepFullRecording && eventsRef.current.every((e) => e.type !== 'snore')) {
+      // 一晚上只有呼吸暂停（无声段）或什么事件都没有：整晚录音没有保留价值，直接删掉
+      if (uri && !keepFullRecording && eventsRef.current.every((e) => e.type === 'apnea')) {
         try {
           await FileSystem.deleteAsync(uri, { idempotent: true });
         } catch {
@@ -1549,9 +1549,17 @@ function AppInner() {
   // 跳转到事件时间点播放
   const seekToEvent = async (evt: SoundEvent) => {
     if (!selectedSession?.recordingUri) return;
-    // 只留鼾声的模式下，磨牙/梦话没有对应音频，不要跳到别的地方去
+    // 呼吸暂停本身是无声段：点了也不会有声音，直接说明清楚，别装作能播
+    if (evt.type === 'apnea') {
+      Alert.alert(
+        '呼吸暂停是无声段',
+        `这 ${(evt.duration / 1000).toFixed(1)} 秒里没有检测到声音。如果暂停结束后有鼾声/喘息，会单独记成一条，可以直接点那条回放。`
+      );
+      return;
+    }
+    // 旧版本（≤1.5.0）只裁了鼾声：那条记录的梦话/磨牙声音已经被删掉，补不回来
     if (selectedSession.recordingMode === 'snore' && evt.playStart === undefined) {
-      Alert.alert('这条没有音频', '录音只保留了鼾声片段，磨牙/梦话没有保存声音。');
+      Alert.alert('这条的声音没有保留', '这晚的录音是旧版本裁的，只留下了鼾声；新版本会保留鼾声、梦话和磨牙。');
       return;
     }
     // 手动点事件 = 退出连播：后续按整晚播放进度高亮
@@ -2296,9 +2304,13 @@ function AppInner() {
                       </Text>
                       <Text style={styles.eventClock}>{formatClock(absStart)} · {(evt.duration / 1000).toFixed(1)}秒</Text>
                     </View>
-                    {selectedSession.recordingUri && (
-                      <Ionicons name="play-circle-outline" size={24} color={T.primary} />
-                    )}
+                    {selectedSession.recordingUri &&
+                      (evt.type === 'apnea' ||
+                      (selectedSession.recordingMode === 'snore' && evt.playStart === undefined) ? (
+                        <Ionicons name="volume-mute-outline" size={24} color={T.textTertiary} />
+                      ) : (
+                        <Ionicons name="play-circle-outline" size={24} color={T.primary} />
+                      ))}
                   </TouchableOpacity>
                 );
               })}
@@ -2641,13 +2653,13 @@ function AppInner() {
                 <Text style={styles.sectionTitle}>保留整晚原始录音</Text>
               </View>
               <Text style={styles.settingsDesc}>
-                关掉（推荐）就只留鼾声；打开会额外保留从头到尾的整晚 WAV（约 1GB），
-                连翻身、说话、安静的部分都在里面。
+                关掉（推荐）只保留有声音的片段（鼾声、梦话、磨牙）；打开会保留从头到尾的整晚 WAV
+                （约 1GB），连翻身、呼吸、安静的部分都在里面。
               </Text>
               <View style={styles.segmentRow}>
                 {(
                   [
-                    { key: false, label: '只留鼾声' },
+                    { key: false, label: '只留有声片段' },
                     { key: true, label: '留整晚' },
                   ] as Array<{ key: boolean; label: string }>
                 ).map((opt) => {

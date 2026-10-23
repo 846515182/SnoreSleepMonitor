@@ -8,7 +8,7 @@ import {
   clipStartMs,
   clipWindow,
   nextClipIndex,
-  planSnoreAudio,
+  planEventAudio,
   selectSnoreClips,
 } from '../clips';
 import type { SoundEvent } from '../../types';
@@ -108,28 +108,32 @@ test('clipStartMs 与 clipWindow.start 一致', () => {
   assert.equal(clipStartMs(evt, 50), clipWindow(evt, 50).start);
 });
 
-test('planSnoreAudio：两段相隔很远的鼾声各裁一段，位置映射对得上', () => {
+test('planEventAudio：鼾声/梦话/磨牙都保留，呼吸暂停（无声段）不裁', () => {
   const events: SoundEvent[] = [
     snore(10_000, 14_000),
     { ...snore(60_000, 62_000), type: 'talk' },
+    { ...snore(70_000, 72_000), type: 'grind' },
+    { ...snore(80_000, 95_000), type: 'apnea' },
     snore(100_000, 103_000),
   ];
-  const plan = planSnoreAudio(events);
-  assert.equal(plan.ranges.length, 2, '中间的梦话不该被裁进来');
-  // 第一段：10000-300 .. 14000+700
+  const plan = planEventAudio(events);
+  assert.equal(plan.ranges.length, 4, '四段有声事件各裁一段，暂停不裁');
   assert.equal(plan.ranges[0].start, 10_000 - CLIP_PAD_BEFORE_MS);
   assert.equal(plan.ranges[0].end, 14_000 + CLIP_PAD_AFTER_MS);
-  const len0 = plan.ranges[0].end - plan.ranges[0].start;
-  // 第二段在新文件里的起点 = 第一段长度 + 事件相对段首的偏移
-  const expectStart = len0 + (100_000 - (100_000 - CLIP_PAD_BEFORE_MS));
-  assert.equal(plan.offsets[2], expectStart);
-  assert.equal(plan.offsets[1], -1, '梦话没有音频');
-  assert.equal(plan.totalMs, len0 + (103_000 + CLIP_PAD_AFTER_MS - (100_000 - CLIP_PAD_BEFORE_MS)));
+
+  // 每段长度：鼾声 5000、梦话 3000、磨牙 3000、鼾声 4000
+  // 每条有声事件都能在新文件里找到自己的位置（以前梦话/磨牙是 -1，点了提示没有音频）
+  assert.equal(plan.offsets[0], CLIP_PAD_BEFORE_MS);
+  assert.equal(plan.offsets[1], 5000 + CLIP_PAD_BEFORE_MS);
+  assert.equal(plan.offsets[2], 8000 + CLIP_PAD_BEFORE_MS);
+  assert.equal(plan.offsets[3], -1, '呼吸暂停是无声段，没有音频');
+  assert.equal(plan.offsets[4], 11000 + CLIP_PAD_BEFORE_MS);
+  assert.equal(plan.totalMs, 15000);
 });
 
 test('planSnoreAudio：挨得很近的鼾声合并成一段，避免夹一堆静音', () => {
   const events: SoundEvent[] = [snore(1_000, 2_000), snore(2_300, 3_500)];
-  const plan = planSnoreAudio(events);
+  const plan = planEventAudio(events);
   assert.equal(plan.ranges.length, 1);
   assert.equal(plan.ranges[0].start, 1_000 - CLIP_PAD_BEFORE_MS);
   assert.equal(plan.ranges[0].end, 3_500 + CLIP_PAD_AFTER_MS);
@@ -143,13 +147,13 @@ test('planSnoreAudio：超过总时长上限就截断，不会裁出几百 MB', 
     const s = i * 60_000;
     events.push(snore(s, s + 20_000));
   }
-  const plan = planSnoreAudio(events, 5 * 60_000);
+  const plan = planEventAudio(events, 5 * 60_000);
   assert.ok(plan.totalMs <= 5 * 60_000, '总时长必须在上限内');
   assert.ok(plan.ranges.length < 100, '超上限后的片段应被丢弃');
 });
 
-test('根本没有鼾声 -> 空计划，调用方不该去裁剪', () => {
-  const plan = planSnoreAudio([{ ...snore(1_000, 2_000), type: 'grind' }]);
+test('只有呼吸暂停（无声）-> 空计划，调用方不该去裁剪', () => {
+  const plan = planEventAudio([{ ...snore(1_000, 2_000), type: 'apnea' }]);
   assert.equal(plan.ranges.length, 0);
   assert.equal(plan.totalMs, 0);
 });

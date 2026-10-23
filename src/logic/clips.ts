@@ -5,7 +5,7 @@
  * 便于在没有设备的环境下做单元测试；播放状态机在 App.tsx 里消费这些函数。
  */
 
-import type { SoundEvent } from '../types';
+import type { SoundEvent, SoundEventType } from '../types';
 
 /** 片段起点向前保留的上下文（听到起鼾前的一瞬） */
 export const CLIP_PAD_BEFORE_MS = 300;
@@ -85,11 +85,14 @@ export function selectSnoreClips(events: readonly SoundEvent[]): SoundEvent[] {
     .sort((a, b) => a.start - b.start);
 }
 
-/** 鼾声片段最多保留的总时长：45 分钟（16kHz 单声道约 86MB） */
-export const MAX_SNORE_AUDIO_MS = 45 * 60 * 1000;
+/** 保留的有声片段最多 45 分钟（16kHz 单声道约 86MB） */
+export const MAX_EVENT_AUDIO_MS = 45 * 60 * 1000;
 
-/** 两段鼾声离得比这还近就并成一段，免得片段之间夹一堆静音 */
+/** 两段声音离得比这还近就并成一段，免得片段之间夹一堆静音 */
 export const CLIP_MERGE_GAP_MS = 400;
+
+/** 默认裁进来的事件类型：鼾声、梦话、磨牙。呼吸暂停本身是无声段，没有音频可留 */
+export const AUDIO_EVENT_TYPES: readonly SoundEventType[] = ['snore', 'talk', 'grind'];
 
 export interface SnoreAudioPlan {
   /** 要从原录音里拷出来的区间（毫秒，升序、互不重叠） */
@@ -101,21 +104,27 @@ export interface SnoreAudioPlan {
 }
 
 /**
- * 计划「只保留鼾声」的裁剪区间。
+ * 计划「只保留有声音的片段」的裁剪区间。
  *
- * 原录音是整晚的（含大量安静时段），用户只想留打呼噜的声音：
- * 把每个鼾声事件前后各留一点上下文，合并挨得太近的段，再按上限截断。
+ * 原录音是整晚的（含大量安静时段）。停止后把每个事件前后各留一点上下文裁出来，
+ * 合并挨得太近的段，再按上限截断。
+ *
+ * 注意：不能只裁鼾声。以前只裁鼾声，梦话/磨牙事件在报告里仍然有播放按钮，
+ * 点了却提示“没有音频”——用户根本听不到那晚到底说了什么、磨了什么。
+ * 现在鼾声/梦话/磨牙都保留，呼吸暂停是无声段，单独在界面上说明。
+ *
  * 返回的 offsets 用来把事件映射到新文件里的位置，回放时直接跳过去。
  */
-export function planSnoreAudio(
+export function planEventAudio(
   events: readonly SoundEvent[],
-  maxTotalMs: number = MAX_SNORE_AUDIO_MS
+  maxTotalMs: number = MAX_EVENT_AUDIO_MS,
+  types: readonly SoundEventType[] = AUDIO_EVENT_TYPES
 ): SnoreAudioPlan {
-  const snoreIdx: number[] = [];
+  const picked: number[] = [];
   events.forEach((e, i) => {
-    if (e.type === 'snore') snoreIdx.push(i);
+    if (types.includes(e.type)) picked.push(i);
   });
-  snoreIdx.sort((a, b) => events[a].start - events[b].start);
+  picked.sort((a, b) => events[a].start - events[b].start);
 
   const ranges: { start: number; end: number }[] = [];
   let cur: { start: number; end: number } | null = null;
@@ -132,7 +141,7 @@ export function planSnoreAudio(
     cur = null;
   };
 
-  for (const i of snoreIdx) {
+  for (const i of picked) {
     if (total >= maxTotalMs) break;
     const ev = events[i];
     const s = Math.max(0, Math.round(ev.start - CLIP_PAD_BEFORE_MS));
@@ -151,7 +160,7 @@ export function planSnoreAudio(
   let base = 0;
   for (let k = 0; k < ranges.length; k++) {
     const r = ranges[k];
-    for (const i of snoreIdx) {
+    for (const i of picked) {
       const ev = events[i];
       if (ev.start >= r.start && ev.start < r.end) {
         offsets[i] = base + (ev.start - r.start);

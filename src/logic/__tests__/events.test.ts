@@ -39,9 +39,14 @@ test('打鼾时长不足 -> 降级尝试其他类型', () => {
   assert.equal(evt, null, '不足 0.5s 的打鼾应被丢弃');
 });
 
-test('梦话：talk 占比 >= 0.5', () => {
-  const evt = classifyFinalEvent(800, { snore: 2, grind: 0, talk: 8, total: 10 }, 0);
+test('梦话：占比 >= 0.6 且至少 1.5 秒（单帧 0.975 秒的误判不再记）', () => {
+  const evt = classifyFinalEvent(2000, { snore: 0, grind: 0, talk: 8, total: 10 }, 0);
   assert.equal(evt?.type, 'talk');
+
+  // 单帧 = 0.975 秒：环境人声/咳嗽，不够 1.5 秒
+  assert.equal(classifyFinalEvent(975, { snore: 0, grind: 0, talk: 2, total: 2 }, 0), null);
+  // 时长够了但占比只有 0.5
+  assert.equal(classifyFinalEvent(2000, { snore: 0, grind: 0, talk: 5, total: 10 }, 0), null);
 });
 
 test('梦话时长不足 -> 丢弃', () => {
