@@ -214,6 +214,8 @@ function AppInner() {
   const [saveRecording, setSaveRecording] = useState(true);
   /** 是否连安静的部分也留着（默认只留有声音的片段，省空间也不占隐私） */
   const [keepFullRecording, setKeepFullRecording] = useState(false);
+  /** 录音降噪：只处理保存的片段（80Hz 高通），识别仍用原始采样 */
+  const [denoiseRecording, setDenoiseRecording] = useState(true);
   const [snoreConfidence, setSnoreConfidence] = useState(0);
   const [grindConfidence, setGrindConfidence] = useState(0);
   const [talkConfidence, setTalkConfidence] = useState(0);
@@ -317,6 +319,9 @@ function AppInner() {
           }
           if (typeof settings.keepFullRecording === 'boolean' && mounted) {
             setKeepFullRecording(settings.keepFullRecording);
+          }
+          if (typeof settings.denoiseRecording === 'boolean' && mounted) {
+            setDenoiseRecording(settings.denoiseRecording);
           }
         }
       } catch (e) {
@@ -818,6 +823,28 @@ function AppInner() {
     }
   };
 
+  /** 切换录音降噪：只影响保存的音频，不影响打鼾判定 */
+  const applyDenoisePref = async (value: boolean) => {
+    setDenoiseRecording(value);
+    try {
+      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+      const settings = raw ? JSON.parse(raw) : {};
+      await AsyncStorage.setItem(
+        SETTINGS_KEY,
+        JSON.stringify({ ...settings, denoiseRecording: value })
+      );
+    } catch (e) {
+      console.warn('保存降噪偏好失败', e);
+    }
+    if (useNativeMeterRef.current && AudioMeter?.setDenoise) {
+      try {
+        await AudioMeter.setDenoise(value);
+      } catch (e) {
+        console.warn('切换原生降噪失败', e);
+      }
+    }
+  };
+
   /** 静默检查麦克风权限，不弹窗（启动时用） */
   const hasMicPermission = async (): Promise<boolean> => {
     try {
@@ -937,6 +964,13 @@ function AppInner() {
             await AudioMeter.setThresholds(snoreThreshold, grindThreshold, talkThreshold);
           } catch (thresholdErr) {
             console.warn('同步阈值到原生模块失败', thresholdErr);
+          }
+          try {
+            if (AudioMeter.setDenoise) {
+              await AudioMeter.setDenoise(denoiseRecording);
+            }
+          } catch (denoiseErr) {
+            console.warn('同步降噪设置到原生模块失败', denoiseErr);
           }
           // 原生模块：用 AudioRecord 录音 + YAMNet 模型实时推理
           const recordingUri = await AudioMeter.startRecording(saveRecording);
@@ -1557,9 +1591,13 @@ function AppInner() {
       );
       return;
     }
-    // 旧版本（≤1.5.0）只裁了鼾声：那条记录的梦话/磨牙声音已经被删掉，补不回来
+    // 片段模式里没有 playStart 的事件：旧版本只裁鼾声，或本次有声片段超过 45 分钟上限，
+    // 或裁剪失败。不能一律甩锅给“旧版本”，否则用户会以为设置没生效。
     if (selectedSession.recordingMode === 'snore' && evt.playStart === undefined) {
-      Alert.alert('这条的声音没有保留', '这晚的录音是旧版本裁的，只留下了鼾声；新版本会保留鼾声、梦话和磨牙。');
+      Alert.alert(
+        '这条没有保留音频',
+        '这晚只保留了部分有声片段：可能是旧版本只裁了鼾声，也可能是有声片段超过 45 分钟上限、后面的没裁。旧音频无法补回；想保留从头到尾的录音，下次监测前选「留整晚」。'
+      );
       return;
     }
     // 手动点事件 = 退出连播：后续按整晚播放进度高亮
@@ -2669,6 +2707,38 @@ function AppInner() {
                       key={opt.label}
                       style={[styles.segmentItem, active && styles.segmentItemActive]}
                       onPress={() => applyKeepFullPref(opt.key)}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
+                        {opt.label}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <View style={[styles.settingHeader, { marginTop: 14 }]}>
+                <View style={[styles.settingIconCircle, { backgroundColor: `${T.success}20` }]}>
+                  <Ionicons name="options-outline" size={20} color={T.success} />
+                </View>
+                <Text style={styles.sectionTitle}>录音降噪</Text>
+              </View>
+              <Text style={styles.settingsDesc}>
+                开启后保存的片段会做 80Hz 高通滤波，压掉风扇、空调的低频隆隆声（20Hz 约降 24dB、50Hz 约降 9dB）；识别仍用原始麦克风数据，不会因为降噪漏记轻声鼾。
+              </Text>
+              <View style={styles.segmentRow}>
+                {(
+                  [
+                    { key: true, label: '开' },
+                    { key: false, label: '关' },
+                  ] as Array<{ key: boolean; label: string }>
+                ).map((opt) => {
+                  const active = denoiseRecording === opt.key;
+                  return (
+                    <TouchableOpacity
+                      key={opt.label}
+                      style={[styles.segmentItem, active && styles.segmentItemActive]}
+                      onPress={() => applyDenoisePref(opt.key)}
                       activeOpacity={0.8}
                     >
                       <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
