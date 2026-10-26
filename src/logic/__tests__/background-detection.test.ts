@@ -31,3 +31,27 @@ test('界面侧订阅了原生推送，并按 windowId 去重', () => {
   assert.ok(app.includes("addListener('AudioMeterResult'"), 'App.tsx 没有订阅 AudioMeterResult');
   assert.ok(app.includes('if (windowId === lastWindowIdRef.current)'), '缺少 windowId 去重，会重复计帧');
 });
+
+/**
+ * 录音降噪（v1.6.3）：只处理写入 WAV 的 PCM，识别仍用原始采样。
+ * 原生侧是二阶 Butterworth 高通，JS 侧负责把设置传给原生。两端任何一端断开，
+ * 要么「降噪不生效」要么「把轻声鼾声一起滤掉导致漏记」，所以钉死这两条链。
+ */
+test('原生降噪：有 80Hz 高通，且只作用于落盘音频', () => {
+  const plugin = read('plugins/withAudioMeter.js');
+  assert.ok(plugin.includes('fun setDenoise(enabled: Boolean'), '原生模块缺少 setDenoise 方法');
+  assert.ok(plugin.includes('hpB0'), '原生模块缺少二阶高通系数（hpB0）');
+  assert.ok(plugin.includes('val y = hpB0 * x + hpB1 * hpX1'), '高通滤波没有按 biquad 递推实现');
+  // 高通只应该在写 WAV 的分支里跑，送入 YAMNet 的 ring 不能被动过
+  const writeBlock = plugin.slice(plugin.indexOf('val out = wavOut'));
+  const ringBlock = plugin.slice(plugin.indexOf('Accumulate for inference'));
+  assert.ok(writeBlock.includes('denoiseEnabled'), '写 WAV 分支没有接入降噪开关');
+  assert.ok(!ringBlock.includes('hpB0'), '送入识别的采样不应被高通滤波');
+});
+
+test('界面侧：降噪设置已接通原生 setDenoise', () => {
+  const app = read('App.tsx');
+  assert.ok(app.includes('denoiseRecording'), 'App.tsx 缺少 denoiseRecording 状态');
+  assert.ok(app.includes('AudioMeter.setDenoise(denoiseRecording)'), '开始监测时没有把降噪设置传给原生');
+  assert.ok(app.includes('录音降噪'), '设置页缺少「录音降噪」入口');
+});
