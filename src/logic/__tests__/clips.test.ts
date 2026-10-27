@@ -46,6 +46,18 @@ test('selectSnoreClips 空输入 / 全非鼾声返回空数组', () => {
   assert.deepEqual(selectSnoreClips([grind(0, 100), { start: 1, end: 2, duration: 1, type: 'apnea' }]), []);
 });
 
+test('selectSnoreClips：裁剪文件模式只返回有 playStart 的鼾声', () => {
+  const noAudio = snore(10_000, 15_000);
+  const playable = { ...snore(20_000, 25_000), playStart: 4_000, playEnd: 9_000 };
+  const fullOnly = selectSnoreClips([noAudio, playable]);
+  assert.deepEqual(fullOnly, [noAudio, playable], '整晚录音模式下两段都能连播');
+  assert.deepEqual(
+    selectSnoreClips([noAudio, playable], true),
+    [playable],
+    '片段文件里没有 playStart 的旧事件必须跳过'
+  );
+});
+
 test('clipWindow：前后留白且起点不小于 0', () => {
   const w = clipWindow(snore(1000, 1800));
   assert.equal(w.start, 1000 - CLIP_PAD_BEFORE_MS);

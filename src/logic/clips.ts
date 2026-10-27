@@ -77,10 +77,21 @@ export function nextClipIndex(
 /**
  * 从会话事件里筛出用于连播的鼾声片段：只保留 type === 'snore'，
  * 按开始时间升序。返回的元素与原数组共享引用（UI 用同一对象做高亮匹配）。
+ *
+ * @param requirePlayStart 录音已经裁成片段文件时传 true：没有 playStart 的鼾声
+ *   事件在裁剪文件里没有对应音频（旧版本只裁鼾声 / 超过 45 分钟上限），
+ *   不能拿去连播，否则会跳到错误位置甚至静音。
  */
-export function selectSnoreClips(events: readonly SoundEvent[]): SoundEvent[] {
+export function selectSnoreClips(
+  events: readonly SoundEvent[],
+  requirePlayStart = false
+): SoundEvent[] {
   return events
-    .filter((e) => e.type === 'snore')
+    .filter(
+      (e) =>
+        e.type === 'snore' &&
+        (!requirePlayStart || typeof e.playStart === 'number')
+    )
     .slice()
     .sort((a, b) => a.start - b.start);
 }

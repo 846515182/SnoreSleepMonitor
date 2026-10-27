@@ -2,24 +2,13 @@
  * 展示层文案与语义色（依赖主题 token，故颜色函数需传入 Theme）。
  */
 
-import type { ApneaRisk, SnoreIntensity, SoundEvent, SoundEventType } from '../types';
+import type { ApneaRisk, SnoreIntensity, SoundEventType } from '../types';
 import type { Theme } from '../theme';
 
 export function getQualityColor(score: number, T: Theme): string {
   if (score >= 85) return T.success;
   if (score >= 60) return T.qualityMid;
   return T.dangerStrong;
-}
-
-export function getIntensityColor(intensity: SnoreIntensity, T: Theme): string {
-  switch (intensity) {
-    case 'severe':
-      return T.dangerStrong;
-    case 'moderate':
-      return T.qualityMid;
-    default:
-      return T.success;
-  }
 }
 
 export function getIntensityLabel(intensity: SnoreIntensity): string {
@@ -88,37 +77,4 @@ export function getEventLabel(
     return `${base}(${getIntensityLabel(intensity)})`;
   }
   return base;
-}
-
-export function getClassLabel(classKey: string): string {
-  switch (classKey) {
-    case 'snoring':
-      return '打鼾';
-    case 'grinding':
-      return '磨牙';
-    case 'talking':
-      return '梦话';
-    case 'apnea':
-      return '异常呼吸音';
-    case 'noise':
-      return '环境音';
-    default:
-      return classKey;
-  }
-}
-
-/** 详情页单条事件的展示元信息 */
-export function describeEvent(evt: SoundEvent, T: Theme) {
-  return {
-    color: getEventColor(evt.type, T),
-    label: getEventLabel(evt.type, evt.intensity),
-    iconName:
-      evt.type === 'snore'
-        ? 'volume-high-outline'
-        : evt.type === 'grind'
-          ? 'git-branch-outline'
-          : evt.type === 'talk'
-            ? 'chatbubble-outline'
-            : 'pulse-outline',
-  };
 }
