@@ -226,9 +226,10 @@ test('原生 header 线程带会话 token，不会给新会话写头', () => {
   assert.ok(plugin.includes('private fun startHeaderUpdater(session: Int)'), 'header 线程没有会话隔离');
   assert.ok(plugin.includes('while (isRecording && audioSessionId == session)'), '旧 header 线程会继续运行');
   assert.ok(plugin.includes('if (audioSessionId != session) break'), 'sleep 后没有再次检查会话');
-  // synchronized { flush(); if (...) update... } 的 lambda 最后一条是 if，
-  // 没有 else 时 Kotlin 会把 if 当表达式而编译失败；显式 Unit 收尾。
-  assert.ok(plugin.includes('                            Unit'), 'synchronized lambda 缺少 Unit，Kotlin 编译会失败');
+  // header 回写、releaseResources、启动失败清理的 lambda 最后一条都是 if，
+  // 没有 else 时 Kotlin 会把它当表达式而编译失败；都要显式 Unit 收尾。
+  const unitLines = plugin.match(/`\s+Unit`,/g) ?? [];
+  assert.ok(unitLines.length >= 3, 'lambda 缺少 Unit，Kotlin 编译会失败');
 });
 
 test('原生裁剪读到 EOF 会失败并保留原文件', () => {
