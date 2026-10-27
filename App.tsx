@@ -33,7 +33,6 @@ import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
 import { clipFinished, clipStartMs, planEventAudio, selectSnoreClips } from './src/logic/clips';
-import { classifyIntensity } from './src/logic/events';
 import {
   classifyFrame,
   DEFAULT_SNORE_CONFIDENCE,
@@ -50,9 +49,6 @@ import {
   getApneaRiskLabel,
   getEventColor,
   getEventLabel,
-  getClassLabel,
-  getIntensityColor,
-  getIntensityLabel,
   getQualityColor,
 } from './src/utils/labels';
 import { resolveTheme } from './src/theme';
@@ -216,15 +212,7 @@ function AppInner() {
   const [keepFullRecording, setKeepFullRecording] = useState(false);
   /** 录音降噪：只处理保存的片段（80Hz 高通），识别仍用原始采样 */
   const [denoiseRecording, setDenoiseRecording] = useState(true);
-  const [snoreConfidence, setSnoreConfidence] = useState(0);
-  const [grindConfidence, setGrindConfidence] = useState(0);
-  const [talkConfidence, setTalkConfidence] = useState(0);
-  const [apneaConfidence, setApneaConfidence] = useState(0);
-  const [topClass, setTopClass] = useState('noise');
-  const [topConfidence, setTopConfidence] = useState(0);
-  const [confidences, setConfidences] = useState<Record<string, number>>({});
   const [isSnoringNow, setIsSnoringNow] = useState(false);
-  const [snoreIntensity, setSnoreIntensity] = useState<'mild' | 'moderate' | 'severe' | null>(null);
   const [isFallbackMode, setIsFallbackMode] = useState(false); // true = 使用 expo-av 降级，无 AI 模型
   const [sleepStartTime, setSleepStartTime] = useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -253,7 +241,6 @@ function AppInner() {
   // （null = 启动加载中，false = 尚未同意，true = 已同意）
   const [privacyAccepted, setPrivacyAccepted] = useState<boolean | null>(null);
   const [themePref, setThemePref] = useState<ThemePreference>('system');
-  const [showAdvanced, setShowAdvanced] = useState(false); // 首页「高级信息」折叠
   const [orbSize, setOrbSize] = useState(184); // 计时圆盘直径：由 timerZone onLayout 自适应
   const [thresholdTab, setThresholdTab] = useState<ThresholdTab>('snore'); // 设置页阈值分段切换
 
@@ -1050,14 +1037,6 @@ function AppInner() {
       setTalkSeconds(0);
       setApneaSeconds(0);
       setVolumeDb(-100);
-      setSnoreConfidence(0);
-      setGrindConfidence(0);
-      setTalkConfidence(0);
-      setApneaConfidence(0);
-      setTopClass('noise');
-      setTopConfidence(0);
-      setConfidences({});
-      setSnoreIntensity(null);
       eventsRef.current = [];
       detectorRef.current.reset();
       maxVolumeDbRef.current = -100;
@@ -1122,20 +1101,9 @@ function AppInner() {
       const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
       const confs: Record<string, number> = result.confidences || {};
       const sConf = confs.snoring ?? 0;
-      const gConf = confs.grinding ?? 0;
-      const tConf = confs.talking ?? 0;
-      const aConf = confs.apnea ?? 0;
       const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
-      const tConfAll = typeof result.topConfidence === 'number' ? result.topConfidence : 0;
       const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
       setVolumeDb(metering);
-      setSnoreConfidence(sConf);
-      setGrindConfidence(gConf);
-      setTalkConfidence(tConf);
-      setApneaConfidence(aConf);
-      setTopClass(tClass);
-      setTopConfidence(tConfAll);
-      setConfidences(confs);
       if (metering > maxVolumeDbRef.current) {
         maxVolumeDbRef.current = metering;
         setMaxVolumeDb(metering);
@@ -1162,11 +1130,6 @@ function AppInner() {
         { snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold }
       );
 
-      if (flags.snore) {
-        setSnoreIntensity(classifyIntensity(sConf));
-      } else if (!flags.loud) {
-        setSnoreIntensity(null);
-      }
       setIsSnoringNow(flags.loud);
       // loud = 任意事件帧，用于锚定静音起点；
       // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
@@ -1222,14 +1185,6 @@ function AppInner() {
     // expo-av 回退路径：从 onRecordingStatusUpdate 回调读取最新 metering
     const metering = lastMeteringRef.current;
     setVolumeDb(metering);
-    setSnoreConfidence(0);
-    setGrindConfidence(0);
-    setTalkConfidence(0);
-    setApneaConfidence(0);
-    setTopClass('noise');
-    setTopConfidence(0);
-    setConfidences({});
-    setSnoreIntensity(null);
     if (metering > maxVolumeDbRef.current) {
       maxVolumeDbRef.current = metering;
       setMaxVolumeDb(metering);
@@ -1412,14 +1367,6 @@ function AppInner() {
     setIsBusy(false);
     setIsFallbackMode(false);
     setVolumeDb(-100);
-    setSnoreConfidence(0);
-    setGrindConfidence(0);
-    setTalkConfidence(0);
-    setApneaConfidence(0);
-    setTopClass('noise');
-    setTopConfidence(0);
-    setConfidences({});
-    setSnoreIntensity(null);
     setIsSnoringNow(false);
     setSnoreSeconds(0);
     setGrindSeconds(0);
@@ -1876,7 +1823,7 @@ function AppInner() {
           </View>
         </View>
 
-        {/* 四类统计：单行四列紧凑排布 */}
+        {/* 四类统计：次数 + 累计时长，全部在主卡内显示，不再另开「高级信息」 */}
         <View style={styles.statsGrid}>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.snore}18` }]}>
@@ -1884,6 +1831,7 @@ function AppInner() {
             </View>
             <Text style={styles.statValue}>{snoreCount}</Text>
             <Text style={styles.statLabel}>打鼾</Text>
+            <Text style={styles.statDuration}>{formatDuration(snoreSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.grind}18` }]}>
@@ -1891,6 +1839,7 @@ function AppInner() {
             </View>
             <Text style={styles.statValue}>{grindCount}</Text>
             <Text style={styles.statLabel}>磨牙</Text>
+            <Text style={styles.statDuration}>{formatDuration(grindSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.talk}18` }]}>
@@ -1898,6 +1847,7 @@ function AppInner() {
             </View>
             <Text style={styles.statValue}>{talkCount}</Text>
             <Text style={styles.statLabel}>梦话</Text>
+            <Text style={styles.statDuration}>{formatDuration(talkSeconds)}</Text>
           </View>
           <View style={styles.statCard}>
             <View style={[styles.statIconCircle, { backgroundColor: `${T.apnea}18` }]}>
@@ -1905,6 +1855,7 @@ function AppInner() {
             </View>
             <Text style={styles.statValue}>{apneaCount}</Text>
             <Text style={styles.statLabel}>呼吸暂停</Text>
+            <Text style={styles.statDuration}>{formatDuration(apneaSeconds)}</Text>
           </View>
         </View>
 
@@ -1934,72 +1885,6 @@ function AppInner() {
             </Text>
           </View>
 
-          {/* 高级信息折叠开关：置信度/强度/峰值音量等细节默认收起，避免首页信息过载 */}
-          <TouchableOpacity
-            style={styles.advancedToggle}
-            onPress={() => setShowAdvanced((v) => !v)}
-            activeOpacity={0.75}
-          >
-            <Text style={styles.advancedToggleText}>高级信息</Text>
-            <Ionicons
-              name={showAdvanced ? 'chevron-up' : 'chevron-down'}
-              size={13}
-              color={T.textSecondary}
-            />
-          </TouchableOpacity>
-
-          {showAdvanced && (
-            <>
-          {/* AI 模型置信度 - 分卡片展示 */}
-          {!isFallbackMode && (
-            <View style={styles.confidenceGrid}>
-              <View style={[styles.confidenceChip, { backgroundColor: `${T.snore}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: T.snore }]}>打鼾</Text>
-                <Text style={[styles.confidenceValue, { color: T.snore }]}>{(snoreConfidence * 100).toFixed(0)}%</Text>
-              </View>
-              <View style={[styles.confidenceChip, { backgroundColor: `${T.grind}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: T.grind }]}>磨牙</Text>
-                <Text style={[styles.confidenceValue, { color: T.grind }]}>{(grindConfidence * 100).toFixed(0)}%</Text>
-              </View>
-              <View style={[styles.confidenceChip, { backgroundColor: `${T.talk}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: T.talk }]}>梦话</Text>
-                <Text style={[styles.confidenceValue, { color: T.talk }]}>{(talkConfidence * 100).toFixed(0)}%</Text>
-              </View>
-              <View style={[styles.confidenceChip, { backgroundColor: `${T.apnea}12` }]}>
-                <Text style={[styles.confidenceLabel, { color: T.apnea }]}>异常呼吸音</Text>
-                <Text style={[styles.confidenceValue, { color: T.apnea }]}>{(apneaConfidence * 100).toFixed(0)}%</Text>
-              </View>
-            </View>
-          )}
-
-          {/* 当前识别类别 */}
-          {!isFallbackMode && (
-            <View style={styles.topClassRow}>
-              <Ionicons name="analytics" size={14} color={T.textTertiary} />
-              <Text style={styles.topClassText}>
-                当前识别：{getClassLabel(topClass)} {(topConfidence * 100).toFixed(0)}%
-              </Text>
-            </View>
-          )}
-
-          {snoreIntensity && (
-            <View style={[styles.intensityBadge, { backgroundColor: getIntensityColor(snoreIntensity, T) + '20' }]}>
-              <Ionicons name="alert-circle" size={14} color={getIntensityColor(snoreIntensity, T)} />
-              <Text style={[styles.intensityText, { color: getIntensityColor(snoreIntensity, T) }]}>
-                鼾声强度：{getIntensityLabel(snoreIntensity)}
-              </Text>
-            </View>
-          )}
-
-          {/* 各类声音累计时长（从统计卡副行移入折叠区，保持首页一屏紧凑） */}
-          <View style={styles.durationRow}>
-            <Text style={styles.durationText}>打鼾 {formatDuration(snoreSeconds)}</Text>
-            <Text style={styles.durationText}>磨牙 {formatDuration(grindSeconds)}</Text>
-            <Text style={styles.durationText}>梦话 {formatDuration(talkSeconds)}</Text>
-            <Text style={styles.durationText}>暂停 {formatDuration(apneaSeconds)}</Text>
-          </View>
-            </>
-          )}
         </View>
         </View>
 

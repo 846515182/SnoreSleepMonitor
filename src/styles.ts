@@ -198,7 +198,7 @@ export const makeStyles = (T: Theme) =>
     flex: 1,
     backgroundColor: T.background,
     borderRadius: 14,
-    paddingVertical: 10,
+    paddingVertical: 8,
     paddingHorizontal: 4,
     alignItems: 'center',
     marginHorizontal: 3,
@@ -222,15 +222,11 @@ export const makeStyles = (T: Theme) =>
     color: T.textSecondary,
     marginTop: 1,
   },
-  /** 高级信息折叠区：各类声音累计时长行 */
-  durationRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 10,
-  },
-  durationText: {
-    fontSize: 11,
+  /** 统计卡内的累计时长（与次数同卡显示，避免再开一块重复信息） */
+  statDuration: {
+    fontSize: 9,
     color: T.textTertiary,
+    marginTop: 2,
     fontVariant: ['tabular-nums'],
   },
   volumeBox: {
@@ -266,57 +262,7 @@ export const makeStyles = (T: Theme) =>
     color: T.text,
     fontVariant: ['tabular-nums'],
   },
-  confidenceGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 14,
-  },
-  confidenceChip: {
-    flex: 1,
-    borderRadius: 12,
-    paddingVertical: 10,
-    alignItems: 'center',
-    marginHorizontal: 3,
-  },
-  confidenceLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  confidenceValue: {
-    fontSize: 16,
-    fontWeight: '800',
-    marginTop: 2,
-    fontVariant: ['tabular-nums'],
-  },
-  topClassRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 12,
-    backgroundColor: T.card,
-    borderRadius: 10,
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-  },
-  topClassText: {
-    fontSize: 12,
-    color: T.textSecondary,
-    marginLeft: 6,
-    fontWeight: '600',
-  },
-  intensityText: {
-    fontSize: 12,
-    fontWeight: '700',
-    marginLeft: 4,
-  },
-  intensityBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    alignSelf: 'flex-start',
-    borderRadius: 8,
-    paddingVertical: 4,
-    paddingHorizontal: 10,
-    marginTop: 8,
-  },
+
   mainButton: {
     borderRadius: 18,
     paddingVertical: 15,
@@ -685,24 +631,6 @@ export const makeStyles = (T: Theme) =>
     height: 1,
     backgroundColor: T.border,
     marginVertical: 18,
-  },
-  // —— 首页「高级信息」折叠 ——
-  advancedToggle: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    alignSelf: 'center',
-    marginTop: 10,
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 999,
-    backgroundColor: T.border,
-  },
-  advancedToggleText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: T.textSecondary,
-    marginRight: 4,
   },
   // —— 设置页「外观主题」分段选择 ——
   segmentRow: {
