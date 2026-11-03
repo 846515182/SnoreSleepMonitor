@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   Alert,
   AppState,
@@ -61,6 +61,13 @@ import {
   fetchLatestRelease,
   type LatestRelease,
 } from './src/services/updater';
+import {
+  MAX_EVENTS_PER_SESSION,
+  type MonitorAction,
+  type MonitorState,
+  initialMonitorState,
+  monitorReducer,
+} from './src/state/monitorState';
 
 // 原生音频模块（Android 专用：AudioRecord 录音 + YAMNet 本地推理）
 const AudioMeter = NativeModules.AudioMeter;
@@ -94,7 +101,6 @@ const MAX_VISIBLE_EVENTS = 200;
 const CHUNK_MS = 300; // 监测循环周期（更频繁采样）
 const DEFAULT_APNEA_CONFIDENCE = 0.3; // 默认呼吸暂停判定：连续无声 15 秒（滑块 0.1–0.9 映射 10–30 秒）
 const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WAV 约 115MB/小时，避免撑爆存储）
-const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
 const MAX_PERSISTED_SESSIONS = 200; // 历史记录持久化条数上限
 const MIN_FREE_STORAGE_BYTES = 1500 * 1024 * 1024; // 开始监测前的剩余空间预警线（整晚 WAV 约 1GB）
 
@@ -152,12 +158,21 @@ export default function App() {
 function AppInner() {
   const [screen, setScreen] = useState<Screen>('home');
   const [selectedSession, setSelectedSession] = useState<SleepSession | null>(null);
-  const [sessions, setSessions] = useState<SleepSession[]>([]);
+  /** 监测状态机 + 历史列表：reducer 是唯一真相源 */
+  const [monitorState, dispatchMonitor] = useReducer(monitorReducer, initialMonitorState);
+  /** reducer 状态的同步镜像：原生回调、停止结算等异步路径在同一 tick 内读最新值 */
+  const monitorRef = useRef<MonitorState>(initialMonitorState);
+  const sendMonitor = (action: MonitorAction): MonitorState => {
+    const next = monitorReducer(monitorRef.current, action);
+    // reducer 判重入：重复 start/stop 返回同一个状态对象，不派发、不重渲染
+    if (next === monitorRef.current) return next;
+    monitorRef.current = next;
+    dispatchMonitor(action);
+    return next;
+  };
   /** 历史记录完成首次加载/恢复前，不能把空数组或半成品写回存储 */
   const [sessionsHydrated, setSessionsHydrated] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [isMonitoring, setIsMonitoring] = useState(false);
-  const [isBusy, setIsBusy] = useState(false);
   const [volumeDb, setVolumeDb] = useState(-100);
   const [maxVolumeDb, setMaxVolumeDb] = useState(-100);
   const [snoreThreshold, setSnoreThreshold] = useState(DEFAULT_SNORE_CONFIDENCE);
@@ -173,15 +188,25 @@ function AppInner() {
   const [isSnoringNow, setIsSnoringNow] = useState(false);
   const [isFallbackMode, setIsFallbackMode] = useState(false); // true = 使用 expo-av 降级，无 AI 模型
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [snoreCount, setSnoreCount] = useState(0);
-  const [grindCount, setGrindCount] = useState(0);
-  const [talkCount, setTalkCount] = useState(0);
-  const [apneaCount, setApneaCount] = useState(0);
-  const [totalNoiseSeconds, setTotalNoiseSeconds] = useState(0);
-  const [snoreSeconds, setSnoreSeconds] = useState(0);
-  const [grindSeconds, setGrindSeconds] = useState(0);
-  const [talkSeconds, setTalkSeconds] = useState(0);
-  const [apneaSeconds, setApneaSeconds] = useState(0);
+  // UI 只读派生值：计数与时长都来自 reducer 内的单一聚合状态，不再各存一份
+  const sessions = monitorState.sessions;
+  const isMonitoring = monitorState.phase === 'monitoring';
+  const isBusy = monitorState.phase === 'starting' || monitorState.phase === 'stopping';
+  const snoreCount = monitorState.counts.snore;
+  const grindCount = monitorState.counts.grind;
+  const talkCount = monitorState.counts.talk;
+  const apneaCount = monitorState.counts.apnea;
+  const snoreSeconds = Math.floor(monitorState.totalsMs.snore / 1000);
+  const grindSeconds = Math.floor(monitorState.totalsMs.grind / 1000);
+  const talkSeconds = Math.floor(monitorState.totalsMs.talk / 1000);
+  const apneaSeconds = Math.floor(monitorState.totalsMs.apnea / 1000);
+  const totalNoiseSeconds = Math.floor(
+    (monitorState.totalsMs.snore +
+      monitorState.totalsMs.grind +
+      monitorState.totalsMs.talk +
+      monitorState.ongoingMs) /
+      1000
+  );
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosMs, setPlaybackPosMs] = useState(0); // 当前播放位置（毫秒）
   const [playbackDurMs, setPlaybackDurMs] = useState(0); // 录音总时长（毫秒）
@@ -206,6 +231,11 @@ function AppInner() {
   // 主题对象是稳定常量；监测时每 300ms 都会重渲染，样式表不能跟着重建 129 个对象。
   const styles = useMemo(() => makeStyles(T), [T]);
   const sessionsRef = useRef<SleepSession[]>([]);
+  /** 会话列表的唯一写入入口：同步 ref + reducer 派发，异步回调不会读到旧列表 */
+  const applySessions = (next: SleepSession[]) => {
+    sessionsRef.current = next;
+    sendMonitor({ type: 'sessions/set', sessions: next });
+  };
 
   const recordingRef = useRef<Audio.Recording | null>(null);
   const recordingUriRef = useRef<string>('');
@@ -227,26 +257,21 @@ function AppInner() {
   const clipListRef = useRef<SoundEvent[]>([]);
   const clipIdxRef = useRef<number>(-1);
   const monitorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const eventsRef = useRef<SoundEvent[]>([]);
   /** 声音事件状态机（纯逻辑，见 src/logic/detector.ts，可用模拟数据单测） */
   const detectorRef = useRef<SoundEventDetector>(new SoundEventDetector());
   /** 呼吸暂停状态机：带上限与呼吸声上下文，避免“安静一整晚”被误判为一次长暂停 */
   const apneaTrackerRef = useRef<ApneaTracker>(
     new ApneaTracker({ minSilenceMs: apneaMinSilenceMs(DEFAULT_APNEA_CONFIDENCE) })
   );
-  /** 各类事件已结束的累计毫秒数：O(1) 更新，替代原先每帧 4 次全量 filter */
-  const totalsRef = useRef({ snore: 0, grind: 0, talk: 0, apnea: 0 });
   const tickCountRef = useRef(0); // 监测循环计数，用于周期性落盘快照
   const lastSnapshotAtRef = useRef(0); // 上一次落盘时间：锁屏后没有定时器，改用时间触发
   const lastSnapshotCountRef = useRef(-1); // 上次落盘时的事件条数：没新增事件就不必重复写
   /** 快照写入串行链：保证 stop 的 clear 排在所有旧快照写入之后，不会“清完又被写回来” */
   const snapshotWriteChainRef = useRef<Promise<void>>(Promise.resolve());
-  const monitoringRef = useRef(false); // 监测中标志：停止后到达的迟到帧一律丢弃
   /** 进行中快照是否应存在：停止并成功落盘历史后置 false，用于回收迟到的快照写入 */
   const activeSnapshotShouldExistRef = useRef(false);
   /** 每次监测的唯一 token：迟到的旧快照写入只能删自己那一份，不能碰新会话 */
   const sessionTokenRef = useRef(0);
-  const eventsTruncatedRef = useRef<boolean>(false);
   const lastWindowIdRef = useRef<number>(-1); // YAMNet 推理窗口序号，避免同一结果被重复计帧
   const audioStalledRef = useRef(false); // 原生录音线程停过：报告要如实标成中断
   const startTimeRef = useRef<number>(0);
@@ -508,10 +533,9 @@ function AppInner() {
           })
         );
         reconciled.sort((a, b) => b.startTime - a.startTime);
-        // 同步 ref：启动阶段紧接着 restoreActiveSession 要用它去重和落盘，
-        // 不能等 React effect 下一帧才更新。
-        sessionsRef.current = reconciled;
-        setSessions(reconciled);
+        // 启动阶段紧接着 restoreActiveSession 要用它去重和落盘，
+        // applySessions 会同步更新 ref，不能等 React effect 下一帧才更新。
+        applySessions(reconciled);
       }
       return true;
     } catch (e) {
@@ -586,8 +610,7 @@ function AppInner() {
             : s
         );
       }
-      sessionsRef.current = next;
-      setSessions(next);
+      applySessions(next);
 
       // 先落盘成功再删快照：否则应用在这两步之间被杀会同时丢会话和快照。
       // 历史加载失败时 canPersist=false，保留快照，下一次启动还能再恢复。
@@ -621,19 +644,20 @@ function AppInner() {
   const writeActiveSnapshot = (lastElapsedMs: number, force = false): Promise<void> => {
     // 停止监测后（包括清空快照之后）绝不能再写：否则下一次启动会把同一条会话
     // 当成“中断的会话”恢复一份副本，还会把刚录好的 WAV 关联到两条记录上。
-    // force 只给 stop 里的裁剪收尾使用，此时 monitoringRef 已经是 false。
-    if (!monitoringRef.current && !force) return Promise.resolve();
+    // force 只给 stop 里的裁剪收尾使用，此时状态机的 phase 已经是 stopping。
+    const phase = monitorRef.current.phase;
+    if ((phase === 'idle' || phase === 'stopping') && !force) return Promise.resolve();
     const token = sessionTokenRef.current;
     const startAt = startTimeRef.current;
     let serialized: string;
     try {
-      // 在入队时冻结数据：真正写盘时 eventsRef 可能已经被下一次监测改写。
+      // 在入队时冻结数据：真正写盘时事件表可能已经被下一次监测改写。
       serialized = JSON.stringify({
         sessionToken: token,
         startTime: startAt,
         lastElapsedMs,
-        events: eventsRef.current,
-        eventsTruncated: eventsTruncatedRef.current,
+        events: monitorRef.current.events,
+        eventsTruncated: monitorRef.current.eventsTruncated,
         recordingUri: recordingUriRef.current || undefined,
         recordingMode: recordingModeRef.current,
       });
@@ -863,8 +887,8 @@ function AppInner() {
   };
 
   const startMonitoring = async () => {
-    // 防止重复启动：UI 状态或原生引用任一处于活跃状态都直接返回
-    if (isBusy || isMonitoring || useNativeMeterRef.current || recordingRef.current) return;
+    // 防止重复启动：状态机不在 idle（starting/monitoring/stopping）或原生引用仍活跃都直接返回
+    if (monitorRef.current.phase !== 'idle' || useNativeMeterRef.current || recordingRef.current) return;
     if (stopInFlightRef.current) return;
     // state 在同一帧内不会立即更新，双击时两次调用都可能通过上面的检查；
     // 这里用同步 ref 挡住第二次，避免原生 start 被重复调用后把第一次的录音清掉。
@@ -875,7 +899,7 @@ function AppInner() {
       startInFlightRef.current = false;
       return;
     }
-    setIsBusy(true);
+    sendMonitor({ type: 'start/begin' });
     let permitted = false;
     try {
       permitted = await checkPermission();
@@ -885,7 +909,7 @@ function AppInner() {
     setHasPermission(permitted);
     if (!permitted) {
       Alert.alert('需要麦克风权限', '请在系统设置中允许本应用使用麦克风，否则无法录音。');
-      setIsBusy(false);
+      sendMonitor({ type: 'start/failed' });
       startInFlightRef.current = false;
       return;
     }
@@ -896,7 +920,7 @@ function AppInner() {
         const freeBytes = await FileSystem.getFreeDiskStorageAsync();
         if (freeBytes < MIN_FREE_STORAGE_BYTES) {
           Alert.alert('存储空间不足', '剩余空间不足 1.5GB，可能无法保存整晚录音，请先在设置页清理缓存。');
-          setIsBusy(false);
+          sendMonitor({ type: 'start/failed' });
           startInFlightRef.current = false;
           return;
         }
@@ -956,6 +980,7 @@ function AppInner() {
           );
           setIsFallbackMode(false);
           deactivateKeepAwake('monitor').catch(() => {});
+          sendMonitor({ type: 'start/failed' });
           return;
         }
         lastMeteringRef.current = -100;
@@ -1008,32 +1033,20 @@ function AppInner() {
       activeSnapshotShouldExistRef.current = true;
       recordingModeRef.current = recordingUriRef.current ? 'full' : undefined;
       setElapsedSeconds(0);
-      setSnoreCount(0);
-      setGrindCount(0);
-      setTalkCount(0);
-      setApneaCount(0);
-      setTotalNoiseSeconds(0);
-      setSnoreSeconds(0);
-      setGrindSeconds(0);
-      setTalkSeconds(0);
-      setApneaSeconds(0);
       setVolumeDb(-100);
-      eventsRef.current = [];
       detectorRef.current.reset();
       maxVolumeDbRef.current = -100;
       apneaTrackerRef.current.reset();
       apneaTrackerRef.current.setMinSilenceMs(apneaMinSilenceMs(apneaThreshold));
-      totalsRef.current = { snore: 0, grind: 0, talk: 0, apnea: 0 };
       tickCountRef.current = 0;
       lastSnapshotAtRef.current = 0;
-      eventsTruncatedRef.current = false;
       lastWindowIdRef.current = -1;
       audioStalledRef.current = false;
       lastSnapshotCountRef.current = -1;
       setMaxVolumeDb(-100);
-      // 先立起「监测中」标志，writeActiveSnapshot 才会真正落盘
-      monitoringRef.current = true;
-      // 立即写一份快照，即使刚启动就崩溃也有据可查
+      // 事件表与计数归零交给 reducer，UI 的计数/时长随之派生
+      sendMonitor({ type: 'start/session-reset' });
+      // 立即写一份快照，即使刚启动就崩溃也有据可查（starting 阶段允许写）
       await writeActiveSnapshot(0);
       // Android 13+：申请通知权限，让「监测中」通知可见
       requestNotificationPermission();
@@ -1055,13 +1068,13 @@ function AppInner() {
         }
       };
       monitorTimerRef.current = setTimeout(runLoop, CHUNK_MS);
-      setIsMonitoring(true);
+      sendMonitor({ type: 'start/succeeded' });
     } catch (e) {
       console.error('开始录音失败', e);
       Alert.alert('启动失败', String(e));
       // 启动失败时可能已经拉起原生录音/前台服务；必须先收尾，否则麦克风会一直占用，
       // 而且入口 guard 会让用户无法再次启动。
-      monitoringRef.current = false;
+      sendMonitor({ type: 'start/failed' });
       activeSnapshotShouldExistRef.current = false;
       try {
         if (useNativeMeterRef.current && AudioMeter) {
@@ -1076,11 +1089,9 @@ function AppInner() {
       recordingRef.current = null;
       recordingUriRef.current = '';
       recordingModeRef.current = undefined;
-      setIsMonitoring(false);
       setIsFallbackMode(false);
       deactivateKeepAwake('monitor').catch(() => {});
     } finally {
-      setIsBusy(false);
       startInFlightRef.current = false;
     }
   };
@@ -1092,9 +1103,10 @@ function AppInner() {
    * 见 JavaTimerManager.onHostPause）。两条路都按 windowId 去重，同一帧不会计两次。
    */
   const applyNativeResult = (result: any) => {
-    // 停止监测后桥接里可能还有排队帧：丢掉，否则会在会话已结算后又改事件，
-    // 甚至把刚清掉的快照写回来。
-    if (!monitoringRef.current) return;
+    // 停止监测后（含 stopping 阶段）桥接里可能还有排队帧：丢掉，否则会在会话已结算后
+    // 又改事件，甚至把刚清掉的快照写回来。
+    const phase = monitorRef.current.phase;
+    if (phase === 'idle' || phase === 'stopping') return;
     try {
       const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
       const confs: Record<string, number> = result.confidences || {};
@@ -1140,7 +1152,7 @@ function AppInner() {
       // 锁屏后定时器停了，快照不能只靠 tick 计数：改成按时间落盘，
       // 这样半夜被系统杀掉也不会丢掉整晚的事件（最多 30 秒）。
       // 没有新事件时降到 5 分钟一次，避免整晚反复写同一份 JSON。
-      const eventCount = eventsRef.current.length;
+      const eventCount = monitorRef.current.events.length;
       if (
         eventCount !== lastSnapshotCountRef.current ||
         now - lastSnapshotAtRef.current >= 5 * 60_000
@@ -1215,10 +1227,6 @@ function AppInner() {
   const trackSilence = (signal: { loud: boolean; breath: boolean }, sessionElapsed: number) => {
     const evt: ApneaEvent | null = apneaTrackerRef.current.onFrame(sessionElapsed, signal);
     if (!evt) return;
-    if (eventsRef.current.length >= MAX_EVENTS_PER_SESSION) {
-      eventsTruncatedRef.current = true;
-      return;
-    }
     const stored: SoundEvent = {
       start: evt.start,
       end: evt.end,
@@ -1226,52 +1234,25 @@ function AppInner() {
       type: 'apnea',
       capped: evt.capped,
     };
-    eventsRef.current.push(stored);
-    accumulate(stored);
-    setApneaCount((c) => c + 1);
+    // 上限、计数、累计时长统一由 reducer 处理
+    recordEvent(stored);
   };
 
-  /** 事件落定时累计时长（O(1)），并同步 UI 上的分类计时 */
-  const accumulate = (evt: SoundEvent) => {
-    totalsRef.current[evt.type] += evt.duration;
-    const t = totalsRef.current;
-    setSnoreSeconds(Math.floor(t.snore / 1000));
-    setGrindSeconds(Math.floor(t.grind / 1000));
-    setTalkSeconds(Math.floor(t.talk / 1000));
-    setApneaSeconds(Math.floor(t.apnea / 1000));
-  };
-
-  // 事件落定：写进事件表并累计（O(1)），不再每帧全量 filter。
+  // 事件落定：写进事件表并累计（O(1)）。事件表、分类计数、分类时长都在 reducer 内一次更新。
   const recordEvent = (evt: SoundEvent) => {
-    if (eventsRef.current.length >= MAX_EVENTS_PER_SESSION) {
-      eventsTruncatedRef.current = true;
-      return;
-    }
-    eventsRef.current.push(evt);
-    accumulate(evt);
-    if (evt.type === 'snore') setSnoreCount((c) => c + 1);
-    else if (evt.type === 'grind') setGrindCount((c) => c + 1);
-    else if (evt.type === 'talk') setTalkCount((c) => c + 1);
+    sendMonitor({ type: 'frame/event', event: evt });
   };
 
-  /** 界面上的累计时长：已结束事件 + 进行中这一段 */
+  /** 界面上的累计时长：已结束事件 + 进行中这一段（由 reducer 的 ongoingMs 驱动派生值） */
   const updateNoiseTotals = () => {
-    const t = totalsRef.current;
-    const finishedNoiseMs = t.snore + t.grind + t.talk;
-    const ongoing = detectorRef.current.ongoingDurationMs;
-    setTotalNoiseSeconds(Math.floor((finishedNoiseMs + ongoing) / 1000));
-    setSnoreSeconds(Math.floor(t.snore / 1000));
-    setGrindSeconds(Math.floor(t.grind / 1000));
-    setTalkSeconds(Math.floor(t.talk / 1000));
-    setApneaSeconds(Math.floor(t.apnea / 1000));
+    sendMonitor({ type: 'frame/ongoing', ms: detectorRef.current.ongoingDurationMs });
   };
 
   const stopMonitoring = async () => {
     if (stopInFlightRef.current || isBusy || !isMonitoring) return;
     stopInFlightRef.current = true;
-    // 先落标志：之后任何迟到帧、任何快照写入都不会再影响这次会话
-    monitoringRef.current = false;
-    setIsBusy(true);
+    // 先切到 stopping：之后任何迟到帧、任何快照写入都不会再影响这次会话
+    sendMonitor({ type: 'stop/begin' });
     try {
     if (monitorTimerRef.current) {
       clearTimeout(monitorTimerRef.current);
@@ -1318,16 +1299,19 @@ function AppInner() {
       let recordingMode: 'snore' | 'full' | undefined = uri ? 'full' : undefined;
       if (uri && useNativeMeterRef.current && AudioMeter && !keepFullRecording) {
         try {
-          const plan = planEventAudio(eventsRef.current);
+          const plan = planEventAudio(monitorRef.current.events);
           if (plan.ranges.length > 0) {
             const cut = await AudioMeter.cutSnoreAudio(uri, JSON.stringify(plan.ranges));
             if (cut) {
               const offsets = plan.offsets;
-              eventsRef.current = eventsRef.current.map((ev, i) =>
-                offsets[i] >= 0
-                  ? { ...ev, playStart: offsets[i], playEnd: offsets[i] + (ev.end - ev.start) }
-                  : ev
-              );
+              sendMonitor({
+                type: 'frame/replace-events',
+                events: monitorRef.current.events.map((ev, i) =>
+                  offsets[i] >= 0
+                    ? { ...ev, playStart: offsets[i], playEnd: offsets[i] + (ev.end - ev.start) }
+                    : ev
+                ),
+              });
               uri = cut;
               recordingMode = 'snore';
               recordingUriRef.current = cut;
@@ -1339,7 +1323,7 @@ function AppInner() {
         }
       }
       // 一晚上只有呼吸暂停（无声段）或什么事件都没有：整晚录音没有保留价值，直接删掉
-      if (uri && !keepFullRecording && eventsRef.current.every((e) => e.type === 'apnea')) {
+      if (uri && !keepFullRecording && monitorRef.current.events.every((e) => e.type === 'apnea')) {
         try {
           await FileSystem.deleteAsync(uri, { idempotent: true });
         } catch {
@@ -1360,22 +1344,21 @@ function AppInner() {
       const session = summarizeSession({
         startTime: startTimeRef.current,
         endTime,
-        events: eventsRef.current,
+        events: monitorRef.current.events,
         recordingUri: uri,
         recordingMode,
-        eventsTruncated: eventsTruncatedRef.current,
+        eventsTruncated: monitorRef.current.eventsTruncated,
         // 录音线程中途停过：别让用户以为整晚都录到了
         interrupted: audioStalledRef.current || undefined,
       });
 
-      // 先显式落盘，再删快照：否则应用在「setSessions 已触发、effect 还没写」
+      // 先显式落盘，再删快照：否则应用在「sessions 已触发、effect 还没写」
       // 的瞬间被杀，会话和快照会一起消失。写盘失败则保留快照，下次启动还能恢复。
       const nextSessions = [session, ...sessionsRef.current].slice(
         0,
         MAX_PERSISTED_SESSIONS
       );
-      setSessions(nextSessions);
-      sessionsRef.current = nextSessions;
+      applySessions(nextSessions);
       if (sessionsHydrated) {
         await persistSessions(nextSessions);
         // 历史已经落盘成功，之后任何迟到的快照写入都应被回收。
@@ -1393,25 +1376,15 @@ function AppInner() {
     useNativeMeterRef.current = false;
     recordingUriRef.current = '';
     recordingModeRef.current = undefined;
-    totalsRef.current = { snore: 0, grind: 0, talk: 0, apnea: 0 };
     tickCountRef.current = 0;
     apneaTrackerRef.current.reset();
-    setIsMonitoring(false);
-    setIsBusy(false);
+    // 状态机回到 idle，事件表/计数/时长由 reducer 统一清零
+    sendMonitor({ type: 'stop/finish' });
     setIsFallbackMode(false);
     setVolumeDb(-100);
     setMaxVolumeDb(-100);
     setIsSnoringNow(false);
     setElapsedSeconds(0);
-    setSnoreCount(0);
-    setGrindCount(0);
-    setTalkCount(0);
-    setApneaCount(0);
-    setTotalNoiseSeconds(0);
-    setSnoreSeconds(0);
-    setGrindSeconds(0);
-    setTalkSeconds(0);
-    setApneaSeconds(0);
     deactivateKeepAwake('monitor').catch(() => {});
     } finally {
       stopInFlightRef.current = false;
@@ -1441,9 +1414,7 @@ function AppInner() {
       }
     }
     // 同步 ref：用户删完立刻开始下一晚时，stopMonitoring 不能再用旧列表把已删记录写回来。
-    const next = sessionsRef.current.filter((s) => s.id !== id);
-    sessionsRef.current = next;
-    setSessions(next);
+    applySessions(sessionsRef.current.filter((s) => s.id !== id));
   };
 
   const playRecording = async (uri: string, startMs?: number): Promise<boolean> => {
@@ -1459,11 +1430,11 @@ function AppInner() {
       if (!(await recordingExists(uri))) {
         if (!isCurrent()) return false;
         // 清掉这条会话里失效的 recordingUri，UI 不再显示播放按钮。
-        const next = sessionsRef.current.map((s) =>
-          s.recordingUri === uri ? { ...s, recordingUri: undefined } : s
+        applySessions(
+          sessionsRef.current.map((s) =>
+            s.recordingUri === uri ? { ...s, recordingUri: undefined } : s
+          )
         );
-        sessionsRef.current = next;
-        setSessions(next);
         if (selectedSession?.recordingUri === uri) {
           setSelectedSession((prev) => (prev ? { ...prev, recordingUri: undefined } : prev));
         }
@@ -1776,8 +1747,8 @@ function AppInner() {
 
   // sessions 变化时自动持久化；停止监测会显式 await 一次，这里负责删除/恢复等其它路径。
   // 必须等首次加载 + 中断恢复完成（sessionsHydrated）后再写，否则可能用空数组覆盖旧历史。
+  // sessionsRef 由 applySessions 同步维护，这里不再重复赋值。
   useEffect(() => {
-    sessionsRef.current = sessions;
     if (!sessionsHydrated) return;
     persistSessions(sessions).catch((e) => {
       console.warn('保存历史记录失败', e);
