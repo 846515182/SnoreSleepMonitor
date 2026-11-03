@@ -17,10 +17,17 @@ interface HistoryRowProps {
 
 /** 历史记录列表项：时间、时长、中断提示、四类计数徽标与质量/风险徽标 */
 export function HistoryRow({ session, T, styles, onPress }: HistoryRowProps) {
+  const counts = [
+    { icon: 'volume-high-outline', color: T.snoreText, value: session.snoreCount },
+    { icon: 'git-branch-outline', color: T.grindText, value: session.grindCount },
+    { icon: 'chatbubble-outline', color: T.talkText, value: session.talkCount },
+    { icon: 'pulse-outline', color: T.apneaText, value: session.apneaCount },
+  ] as const;
+
   return (
     <TouchableOpacity style={styles.historyItem} onPress={onPress} activeOpacity={0.85}>
       <View style={styles.historyRow}>
-        <View style={{ flex: 1 }}>
+        <View style={styles.historyMain}>
           <Text style={styles.historyTime}>{formatTime(session.startTime)}</Text>
           <View style={styles.historyMetaRow}>
             <Ionicons name="time-outline" size={14} color={T.textTertiary} />
@@ -28,43 +35,42 @@ export function HistoryRow({ session, T, styles, onPress }: HistoryRowProps) {
           </View>
           {session.interrupted && (
             <View style={styles.historyMetaRow}>
-              <Ionicons name="alert-circle-outline" size={14} color={T.warning} />
-              <Text style={[styles.historyMeta, { color: T.warning }]}>录音中断，记录可能不完整</Text>
+              <Ionicons name="alert-circle-outline" size={14} color={T.warningText} />
+              <Text style={[styles.historyMeta, { color: T.warningText }]}>
+                录音中断，记录可能不完整
+              </Text>
             </View>
           )}
           <View style={styles.historyCountRow}>
-            <View style={[styles.historyCount, { backgroundColor: `${T.snore}15` }]}>
-              <Ionicons name="volume-high-outline" size={14} color={T.snore} />
-              <Text style={[styles.historyCountText, { color: T.snore }]}>{session.snoreCount}</Text>
-            </View>
-            <View style={[styles.historyCount, { backgroundColor: `${T.grind}15` }]}>
-              <Ionicons name="git-branch-outline" size={14} color={T.grind} />
-              <Text style={[styles.historyCountText, { color: T.grind }]}>{session.grindCount}</Text>
-            </View>
-            <View style={[styles.historyCount, { backgroundColor: `${T.talk}15` }]}>
-              <Ionicons name="chatbubble-outline" size={14} color={T.talk} />
-              <Text style={[styles.historyCountText, { color: T.talk }]}>{session.talkCount}</Text>
-            </View>
-            <View style={[styles.historyCount, { backgroundColor: `${T.apnea}15` }]}>
-              <Ionicons name="pulse-outline" size={14} color={T.apnea} />
-              <Text style={[styles.historyCountText, { color: T.apnea }]}>{session.apneaCount}</Text>
-            </View>
+            {counts.map((item) => (
+              <View key={item.icon} style={styles.historyCount}>
+                <Ionicons name={item.icon} size={14} color={item.color} />
+                <Text style={[styles.historyCountText, { color: item.color }]}>{item.value}</Text>
+              </View>
+            ))}
           </View>
         </View>
-        <View style={{ alignItems: 'flex-end' }}>
+
+        <View style={styles.historyRight}>
           <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(session.qualityScore, T) }]}>
             <Text style={styles.qualityText}>{session.qualityScore}分</Text>
           </View>
           <View
             style={[
               styles.apneaRiskBadge,
-              { backgroundColor: getApneaRiskColor(session.apneaRisk || 'low', T), marginTop: 6 },
+              { backgroundColor: getApneaRiskColor(session.apneaRisk || 'low', T) },
             ]}
           >
             <Text style={styles.apneaRiskText}>{getApneaRiskLabel(session.apneaRisk || 'low')}</Text>
           </View>
         </View>
-        <Ionicons name="chevron-forward" size={20} color={T.textTertiary} style={{ marginLeft: 8 }} />
+
+        <Ionicons
+          name="chevron-forward"
+          size={18}
+          color={T.textTertiary}
+          style={styles.historyChevron}
+        />
       </View>
     </TouchableOpacity>
   );

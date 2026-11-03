@@ -5,10 +5,11 @@
 import type { ApneaRisk, SnoreIntensity, SoundEventType } from '../types';
 import type { Theme } from '../theme';
 
+/** 徽标底色：与其上的 onAccent 文字保持 ≥ 4.5:1 对比度 */
 export function getQualityColor(score: number, T: Theme): string {
   if (score >= 85) return T.success;
   if (score >= 60) return T.qualityMid;
-  return T.dangerStrong;
+  return T.danger;
 }
 
 export function getIntensityLabel(intensity: SnoreIntensity): string {
@@ -25,7 +26,7 @@ export function getIntensityLabel(intensity: SnoreIntensity): string {
 export function getApneaRiskColor(risk: ApneaRisk, T: Theme): string {
   switch (risk) {
     case 'high':
-      return T.dangerStrong;
+      return T.danger;
     case 'moderate':
       return T.qualityMid;
     default:
@@ -56,6 +57,22 @@ export function getEventColor(type: SoundEventType, T: Theme): string {
       return T.dangerStrong;
     default:
       return T.noise;
+  }
+}
+
+/** 事件文字色：比图标填充色深/亮一档，保证正文对比度 ≥ 4.5:1 */
+export function getEventTextColor(type: SoundEventType, T: Theme): string {
+  switch (type) {
+    case 'snore':
+      return T.snoreText;
+    case 'grind':
+      return T.grindText;
+    case 'talk':
+      return T.talkText;
+    case 'apnea':
+      return T.apneaText;
+    default:
+      return T.textSecondary;
   }
 }
 

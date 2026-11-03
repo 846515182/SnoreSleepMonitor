@@ -17,7 +17,10 @@ interface StatCardProps {
   styles: AppStyles;
 }
 
-/** 首页 4 张统计卡与详情页 9 张统计卡的统一实现（仅排版不同） */
+/**
+ * 首页 4 张统计格与详情页 4 张计数格的统一实现。
+ * 两种变体只差字号与图标尺寸，列宽由父级等分，不再手写 width。
+ */
 export function StatCard({ icon, color, value, label, subText, variant, styles }: StatCardProps) {
   if (variant === 'home') {
     return (
@@ -33,7 +36,7 @@ export function StatCard({ icon, color, value, label, subText, variant, styles }
   }
   return (
     <View style={styles.detailStatCard}>
-      <Ionicons name={icon} size={20} color={color} />
+      <Ionicons name={icon} size={18} color={color} />
       <Text style={styles.detailStatValue}>{value}</Text>
       <Text style={styles.detailStatLabel}>{label}</Text>
     </View>

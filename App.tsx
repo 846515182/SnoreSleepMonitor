@@ -54,6 +54,8 @@ import { StatCard } from './src/components/StatCard';
 import { SegmentControl } from './src/components/SegmentControl';
 import { SettingHeader, SettingSection } from './src/components/SettingSection';
 import { HistoryRow } from './src/components/HistoryRow';
+import { ScreenHeader } from './src/components/ScreenHeader';
+import { InfoBanner } from './src/components/InfoBanner';
 import {
   cancelActiveDownload,
   cleanAppCache,
@@ -1834,81 +1836,67 @@ function AppInner() {
   // UI 渲染
   const renderHome = () => (
     <ScrollView contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
-      {/* 顶部标题区 */}
-      <View style={styles.heroCard}>
-        <View style={styles.heroAccentBar} />
-        <View style={styles.heroHeader}>
-          <View style={styles.appIconCircle}>
-            <Ionicons name="moon" size={22} color={T.onAccent} />
-          </View>
-          <View style={styles.heroTitleBlock}>
-            <Text style={styles.title}>睡眠监测</Text>
-            <Text style={styles.subtitle}>v{CURRENT_VERSION} · 守护整晚安睡</Text>
-          </View>
-          {updateCheckState === 'available' && latestRelease && (
-            <TouchableOpacity
-              style={styles.updateBadge}
-              onPress={() => promptUpdate(latestRelease)}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="arrow-up-circle" size={14} color={T.onAccent} />
-              <Text style={styles.updateBadgeText}>新版</Text>
-            </TouchableOpacity>
-          )}
+      {/* 顶部信息条：应用标识 + 版本 + 更新入口 */}
+      <View style={styles.appBar}>
+        <View style={styles.appIconCircle}>
+          <Ionicons name="moon" size={22} color={T.onAccent} />
         </View>
-
-        {/* 快捷导航：紧贴顶部，任何机型打开即可看到，无需下滑 */}
-        <View style={styles.quickNavRow}>
-          <TouchableOpacity
-            style={styles.quickNavButton}
-            onPress={() => setScreen('history')}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="time-outline" size={17} color={T.primary} style={{ marginRight: 6 }} />
-            <Text style={styles.quickNavText}>历史记录</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.quickNavButton}
-            onPress={() => setScreen('settings')}
-            activeOpacity={0.85}
-          >
-            <Ionicons name="settings-outline" size={17} color={T.primary} style={{ marginRight: 6 }} />
-            <Text style={styles.quickNavText}>设置</Text>
-          </TouchableOpacity>
+        <View style={styles.heroTitleBlock}>
+          <Text style={styles.title}>睡眠监测</Text>
+          <Text style={styles.subtitle}>v{CURRENT_VERSION} · 守护整晚安睡</Text>
         </View>
-
-        {hasPermission === false && (
-          <View style={styles.warningBox}>
-            <Ionicons name="warning-outline" size={20} color={T.warningFg} />
-            <View style={{ flex: 1, marginLeft: 10 }}>
-              <Text style={styles.warningText}>未获得麦克风权限，无法录音。</Text>
-            </View>
-            <TouchableOpacity
-              style={styles.warningButton}
-              onPress={async () => setHasPermission(await checkPermission())}
-            >
-              <Text style={styles.warningButtonText}>去授权</Text>
-            </TouchableOpacity>
-          </View>
+        {updateCheckState === 'available' && latestRelease && (
+          <TouchableOpacity
+            style={styles.updateBadge}
+            onPress={() => promptUpdate(latestRelease)}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="arrow-up-circle" size={14} color={T.dangerText} />
+            <Text style={styles.updateBadgeText}>新版</Text>
+          </TouchableOpacity>
         )}
+      </View>
 
-        {isFallbackMode && (
-          <View style={styles.infoBox}>
-            <Ionicons name="information-circle-outline" size={20} color={T.infoFg} />
-            <Text style={styles.infoText}>
-              兼容模式：仅检测音量，不区分鼾声/磨牙等事件。
-            </Text>
-          </View>
-        )}
+      {/* 快捷导航：与标题同一视觉层，48px 触摸高度 */}
+      <View style={styles.navRow}>
+        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('history')} activeOpacity={0.85}>
+          <Ionicons name="time-outline" size={18} color={T.primaryText} />
+          <Text style={styles.navButtonText}>历史记录</Text>
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.navButton} onPress={() => setScreen('settings')} activeOpacity={0.85}>
+          <Ionicons name="settings-outline" size={18} color={T.primaryText} />
+          <Text style={styles.navButtonText}>设置</Text>
+        </TouchableOpacity>
+      </View>
 
-        {/* 主体区：富余高度集中给居中的计时圆盘，屏幕铺满且留白有意为之 */}
-        <View style={styles.homeBody}>
-        {/* 计时圆盘：直径随可用高度自适应（大屏 184，小屏收缩到 130+），onLayout 驱动 */}
+      {hasPermission === false && (
+        <InfoBanner
+          variant="warning"
+          icon="warning-outline"
+          message="未获得麦克风权限，无法录音。"
+          styles={styles}
+          T={T}
+          action={{ label: '去授权', onPress: async () => setHasPermission(await checkPermission()) }}
+        />
+      )}
+
+      {isFallbackMode && (
+        <InfoBanner
+          variant="info"
+          icon="information-circle-outline"
+          message="兼容模式：仅检测音量，不区分鼾声/磨牙等事件。"
+          styles={styles}
+          T={T}
+        />
+      )}
+
+      {/* 计时卡：整屏视觉焦点是计时数字，主操作紧贴其下 */}
+      <View style={styles.timerCard}>
         <View
           style={styles.timerZone}
           onLayout={(e) => {
             const h = Math.round(e.nativeEvent.layout.height);
-            const next = Math.max(130, Math.min(184, h - 16));
+            const next = Math.max(120, Math.min(176, h - 16));
             setOrbSize((prev) => (Math.abs(prev - next) > 2 ? next : prev));
           }}
         >
@@ -1916,8 +1904,7 @@ function AppInner() {
             <Ionicons
               name={isMonitoring ? 'mic' : 'moon'}
               size={Math.round(orbSize / 6)}
-              color={isMonitoring ? T.danger : T.primary}
-              style={{ marginBottom: 8 }}
+              color={isMonitoring ? T.danger : T.primaryText}
             />
             <Text style={[styles.timerValue, { fontSize: Math.round(orbSize * 0.185) }]}>
               {formatDuration(elapsedSeconds)}
@@ -1929,82 +1916,8 @@ function AppInner() {
           </View>
         </View>
 
-        {/* 四类统计：次数 + 累计时长，全部在主卡内显示，不再另开「高级信息」 */}
-        <View style={styles.statsGrid}>
-          <StatCard
-            variant="home"
-            icon="volume-high"
-            color={T.snore}
-            value={snoreCount}
-            label="打鼾"
-            subText={formatDuration(snoreSeconds)}
-            styles={styles}
-          />
-          <StatCard
-            variant="home"
-            icon="git-branch"
-            color={T.grind}
-            value={grindCount}
-            label="磨牙"
-            subText={formatDuration(grindSeconds)}
-            styles={styles}
-          />
-          <StatCard
-            variant="home"
-            icon="chatbubble"
-            color={T.talk}
-            value={talkCount}
-            label="梦话"
-            subText={formatDuration(talkSeconds)}
-            styles={styles}
-          />
-          <StatCard
-            variant="home"
-            icon="pulse"
-            color={T.apnea}
-            value={apneaCount}
-            label="呼吸暂停"
-            subText={formatDuration(apneaSeconds)}
-            styles={styles}
-          />
-        </View>
-
-        {/* 实时音量区域 */}
-        <View style={styles.volumeBox}>
-          <View style={styles.volumeHeader}>
-            <Text style={styles.volumeLabel}>实时音量</Text>
-            <Text style={styles.volumeHeaderValue}>{volumeDb.toFixed(1)} dB</Text>
-          </View>
-          <View style={styles.volumeBarBg}>
-            <View
-              style={[
-                styles.volumeBarFill,
-                {
-                  width: `${Math.min(100, Math.max(0, (volumeDb + 80) / 80 * 100))}%`,
-                  backgroundColor: isSnoringNow ? T.danger : T.primary,
-                },
-              ]}
-            />
-          </View>
-          <View style={styles.volumeRow}>
-            <Text style={[styles.volumeState, { color: isSnoringNow ? T.danger : T.textSecondary }]}>
-              {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
-            </Text>
-            <Text style={styles.volumeState}>
-              峰值 {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'} · 声音 {formatDuration(totalNoiseSeconds)}
-            </Text>
-          </View>
-
-        </View>
-        </View>
-
-        {/* 主按钮 */}
         <TouchableOpacity
-          style={[
-            styles.mainButton,
-            isMonitoring ? styles.stopButton : styles.startButton,
-            isBusy && { opacity: 0.7 },
-          ]}
+          style={[styles.mainButton, isMonitoring ? styles.stopButton : styles.startButton, isBusy && { opacity: 0.7 }]}
           onPress={isMonitoring ? stopMonitoring : startMonitoring}
           activeOpacity={0.8}
           disabled={isBusy}
@@ -2017,7 +1930,6 @@ function AppInner() {
                 name={isMonitoring ? 'stop-circle' : 'play-circle'}
                 size={22}
                 color={T.onAccent}
-                style={{ marginRight: 8 }}
               />
               <Text style={styles.mainButtonText}>
                 {isMonitoring ? '停止监测' : '开始睡眠监测'}
@@ -2033,26 +1945,92 @@ function AppInner() {
           </View>
         )}
       </View>
+
+      {/* 今晚统计：四个等宽格子，格间用 1px 分隔线，不再各画一张嵌套卡 */}
+      <View style={styles.card}>
+        <View style={styles.statsGrid}>
+          <StatCard
+            variant="home"
+            icon="volume-high"
+            color={T.snoreText}
+            value={snoreCount}
+            label="打鼾"
+            subText={formatDuration(snoreSeconds)}
+            styles={styles}
+          />
+          <View style={styles.statDivider} />
+          <StatCard
+            variant="home"
+            icon="git-branch"
+            color={T.grindText}
+            value={grindCount}
+            label="磨牙"
+            subText={formatDuration(grindSeconds)}
+            styles={styles}
+          />
+          <View style={styles.statDivider} />
+          <StatCard
+            variant="home"
+            icon="chatbubble"
+            color={T.talkText}
+            value={talkCount}
+            label="梦话"
+            subText={formatDuration(talkSeconds)}
+            styles={styles}
+          />
+          <View style={styles.statDivider} />
+          <StatCard
+            variant="home"
+            icon="pulse"
+            color={T.apneaText}
+            value={apneaCount}
+            label="呼吸暂停"
+            subText={formatDuration(apneaSeconds)}
+            styles={styles}
+          />
+        </View>
+      </View>
+
+      {/* 实时音量 */}
+      <View style={styles.volumeCard}>
+        <View style={styles.volumeHeader}>
+          <Text style={styles.volumeLabel}>实时音量</Text>
+          <Text style={styles.volumeHeaderValue}>{volumeDb.toFixed(1)} dB</Text>
+        </View>
+        <View style={styles.volumeBarBg}>
+          <View
+            style={[
+              styles.volumeBarFill,
+              {
+                width: `${Math.min(100, Math.max(0, (volumeDb + 80) / 80 * 100))}%`,
+                backgroundColor: isSnoringNow ? T.danger : T.primary,
+              },
+            ]}
+          />
+        </View>
+        <View style={styles.volumeRow}>
+          <Text style={[styles.volumeState, { color: isSnoringNow ? T.dangerText : T.textSecondary }]}>
+            {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
+          </Text>
+          <Text style={styles.volumeState}>
+            峰值 {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'} · 声音 {formatDuration(totalNoiseSeconds)}
+          </Text>
+        </View>
+      </View>
     </ScrollView>
   );
 
   const renderHistory = () => (
     <View style={styles.flex}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Ionicons name="chevron-back" size={26} color={T.primary} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>历史记录</Text>
-        <View style={{ width: 40 }} />
-      </View>
+      <ScreenHeader title="历史记录" onBack={() => setScreen('home')} T={T} styles={styles} />
       <FlatList
         data={sessions}
         keyExtractor={(item) => item.id}
-        contentContainerStyle={{ padding: 16 }}
+        contentContainerStyle={styles.historyList}
         ListEmptyComponent={
           <View style={styles.emptyBox}>
             <View style={styles.emptyIconCircle}>
-              <Ionicons name="bed-outline" size={48} color={T.primary} />
+              <Ionicons name="bed-outline" size={44} color={T.primaryText} />
             </View>
             <Text style={styles.emptyText}>暂无睡眠记录</Text>
             <Text style={styles.emptySubText}>点击首页“开始睡眠监测”，记录整晚声音</Text>
