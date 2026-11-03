@@ -363,7 +363,7 @@ export const makeStyles = (T: Theme) =>
       color: T.infoFg,
     },
     bannerAction: {
-      minHeight: 40,
+      minHeight: 44,
       justifyContent: 'center',
       borderRadius: radius.sm,
       paddingHorizontal: spacing.md,
