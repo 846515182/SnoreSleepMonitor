@@ -26,14 +26,9 @@ test('原生模块每帧主动推送结果', () => {
   assert.ok(processWindow.includes('emitResult()'), 'processWindow 处理完一帧没有调用 emitResult()');
 });
 
-test('界面侧订阅了原生推送，并按 windowId 去重', () => {
+test('界面侧订阅了原生推送（帧去重规则见 monitor-state.test.ts）', () => {
   const app = read('App.tsx');
   assert.ok(app.includes("addListener('AudioMeterResult'"), 'App.tsx 没有订阅 AudioMeterResult');
-  assert.ok(
-    app.includes('windowId <= lastWindowIdRef.current'),
-    '缺少 windowId 去重，会重复计帧'
-  );
-  assert.ok(app.includes('windowId < 0'), '新会话第一帧 windowId=-1 应被忽略');
 });
 
 /**
@@ -72,10 +67,9 @@ test('设置页改阈值不会把降噪/录音偏好覆盖掉', () => {
   assert.ok(saveSettings.includes('keepFullRecording'), '改阈值时漏写 keepFullRecording');
 });
 
-test('监测中改阈值：原生和轮询路径都读最新值', () => {
+test('监测中改阈值会同步给原生（阈值判定行为见 monitor-state.test.ts）', () => {
   const app = read('App.tsx');
   assert.ok(app.includes('AudioMeter.setThresholds(nextSnore'), '监测中改阈值没有同步给原生');
-  assert.ok(app.includes('thresholdsRef.current'), '轮询闭包没有读最新阈值');
 });
 
 test('停止监测：先写历史记录，再删进行中快照', () => {
@@ -180,21 +174,18 @@ test('播放请求有 generation，离开详情页不会被迟到的 createAsync
   assert.ok(stop.includes('playbackGenerationRef.current += 1'), 'stopPlayback 没有作废在途播放');
 });
 
-test('启动监测有同步锁，且历史未加载时禁止启动', () => {
+test('启动前检查历史加载结果与存储空间（启停互斥见 monitor-state.test.ts）', () => {
   const app = read('App.tsx');
-  assert.ok(app.includes('startInFlightRef'), '缺少同步启动锁');
   const start = app.slice(app.indexOf('const startMonitoring'), app.indexOf('const applyNativeResult'));
-  assert.ok(start.includes('if (startInFlightRef.current) return;'), '双击仍可能启动两次');
   assert.ok(start.includes('if (!sessionsHydrated)'), '历史读取失败时仍允许开始监测，可能覆盖旧记录');
   assert.ok(start.includes('if (freeBytes < MIN_FREE_STORAGE_BYTES)'), '存储预检缺失');
   const storageBlock = start.slice(start.indexOf('if (freeBytes < MIN_FREE_STORAGE_BYTES)'));
   assert.ok(storageBlock.includes('return;'), '空间不足只弹窗却继续启动，会写满磁盘');
 });
 
-test('停止监测有同步锁，迟到快照写入不会在 clear 之后复活', () => {
+test('停止监测后迟到的快照写入不会在 clear 之后复活（停止互斥见 monitor-state.test.ts）', () => {
   const app = read('App.tsx');
   const stop = app.slice(app.indexOf('const stopMonitoring'), app.indexOf('const deleteSession'));
-  assert.ok(stop.includes('stopInFlightRef.current = true'), '缺少同步停止锁');
   assert.ok(stop.includes('activeSnapshotShouldExistRef.current = false'), '落盘成功后没有作废进行中快照');
   assert.ok(app.includes('sessionTokenRef'), '快照没有会话 token');
   assert.ok(app.includes('snapshotWriteChainRef'), '快照写入没有串行化');

@@ -68,6 +68,31 @@ const EMPTY_TOTALS: MonitorTotalsMs = { snore: 0, grind: 0, talk: 0, apnea: 0 };
 
 const isCollecting = (phase: MonitorPhase) => phase === 'starting' || phase === 'monitoring';
 
+/** 只有 idle 允许发起启动；starting/monitoring/stopping 一律忽略，双击不会启动两次。 */
+export const canStartMonitoring = (phase: MonitorPhase): boolean => phase === 'idle';
+
+/** 只有 monitoring 允许发起停止；stopping 中的重复点击被忽略，不会重复结算。 */
+export const canStopMonitoring = (phase: MonitorPhase): boolean => phase === 'monitoring';
+
+/**
+ * 原生推来的这一帧是否应计入本次会话。
+ *
+ * - idle / stopping：会话已经结算（或从未开始），桥接里排队的迟到帧必须丢弃，
+ *   否则会在停止后改动事件表、甚至把刚清掉的快照写回来。
+ * - windowId < 0：原生 start 时复位为 -1，第一帧无效。
+ * - windowId <= lastWindowId：YAMNet 0.975s 窗口 + 300ms 轮询，同一窗口会重复推送，
+ *   用 <= 同时挡住乱序与旧会话的迟到帧。
+ */
+export function shouldAcceptNativeFrame(
+  phase: MonitorPhase,
+  windowId: number,
+  lastWindowId: number
+): boolean {
+  if (phase === 'idle' || phase === 'stopping') return false;
+  if (!Number.isFinite(windowId) || windowId < 0) return false;
+  return windowId > lastWindowId;
+}
+
 export function monitorReducer(state: MonitorState, action: MonitorAction): MonitorState {
   switch (action.type) {
     // 防重入：非 idle 时重复 start 直接忽略，不会产生第二次原生启动

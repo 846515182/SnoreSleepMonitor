@@ -11,5 +11,5 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "include": ["src/logic/**/*.ts", "src/types.ts"]
+  "include": ["src/logic/**/*.ts", "src/state/**/*.ts", "src/types.ts"]
 }
