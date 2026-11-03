@@ -128,11 +128,71 @@ jobs:
           api-level: 30
           arch: x86_64
           target: google_apis
-          disable-animations: true
+          # runner 内置的 disable-animations 会在 boot 完成后立刻调 settings，
+          # 模拟器刚启动时 adbd 偶发 Broken pipe(32) 并让整个步骤以 224 退出。
+          # 改为关闭它，由下面的 script 做带重试的 adb 配置。
+          disable-animations: false
           ram-size: 4096M
           heap-size: 512M
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot-save
-          script: ./emulator-test.sh
+          emulator-boot-timeout: 600
+          script: |
+            #!/bin/sh
+            set -eu
+            setup_log=/tmp/emulator-adb-setup.log
+
+            # adb 在资源紧张的 runner 上会短暂掉线（device offline / Broken pipe），
+            # 所以 boot 确认与 settings 写入都放在可重试的整段里执行。
+            is_booted() {
+              val=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r ')
+              [ "$val" = "1" ]
+            }
+
+            configure_once() {
+              timeout 60 adb wait-for-device || return 1
+              i=0
+              while [ "$i" -lt 24 ]; do
+                if is_booted; then
+                  echo "boot_completed=1 after about $((i * 5))s"
+                  break
+                fi
+                i=$((i + 1))
+                sleep 5
+              done
+              if ! is_booted; then
+                echo "boot_completed still not 1 after 120s"
+                return 1
+              fi
+              adb shell settings put global window_animation_scale 0.0 || return 1
+              adb shell settings put global transition_animation_scale 0.0 || return 1
+              adb shell settings put global animator_duration_scale 0.0 || return 1
+              adb shell settings put system screen_off_timeout 2147483647 || return 1
+            }
+
+            ok=0
+            for attempt in 1 2 3; do
+              echo "== adb configure attempt $attempt/3 =="
+              if configure_once >"$setup_log" 2>&1; then
+                cat "$setup_log"
+                ok=1
+                break
+              fi
+              echo "attempt $attempt failed, last output:"
+              cat "$setup_log" || true
+              if [ "$attempt" -lt 3 ]; then
+                echo "retrying in 10s"
+                sleep 10
+              fi
+            done
+
+            if [ "$ok" != "1" ]; then
+              echo "ERROR: adb configuration failed after 3 attempts"
+              adb devices || true
+              exit 1
+            fi
+
+            echo "adb configuration applied, running smoke test"
+            ./emulator-test.sh
 
       - name: Upload logs and screenshot
         if: always()
