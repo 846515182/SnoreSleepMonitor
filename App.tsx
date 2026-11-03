@@ -63,6 +63,9 @@ import {
 } from './src/services/updater';
 import {
   MAX_EVENTS_PER_SESSION,
+  canStartMonitoring,
+  canStopMonitoring,
+  shouldAcceptNativeFrame,
   type MonitorAction,
   type MonitorState,
   initialMonitorState,
@@ -241,10 +244,6 @@ function AppInner() {
   const recordingUriRef = useRef<string>('');
   const recordingModeRef = useRef<'snore' | 'full' | undefined>(undefined);
   const useNativeMeterRef = useRef<boolean>(false);
-  /** 同步的启动锁：state 在双击的同一帧还来不及更新，必须用 ref 阻止第二次启动 */
-  const startInFlightRef = useRef(false);
-  /** 同步的停止锁：避免双击“停止监测”并发结算出两条相同会话 */
-  const stopInFlightRef = useRef(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   /** soundRef 里当前加载的是哪一条录音；切会话后不能拿旧音频直接 seek */
   const loadedRecordingUriRef = useRef<string>('');
@@ -279,12 +278,6 @@ function AppInner() {
   const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
   /** 设置写入串行化：连续点阈值/开关时，避免并发读改写互相覆盖 */
   const settingsWriteRef = useRef<Promise<void>>(Promise.resolve());
-  /**
-   * 监测循环的 setTimeout 闭包只在启动那一帧创建；设置页在监测中改阈值时，
-   * 轮询路径必须读最新值，否则会和原生推送路径用两套阈值判定。
-   */
-  const thresholdsRef = useRef({ snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold });
-  thresholdsRef.current = { snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold };
 
   // 启动流程：加载设置 → 清理过期录音 → 加载历史 → 恢复中断会话 → 静默检查权限 → 检查更新
   // 注意：这里只「检查」麦克风权限而不「请求」，权限弹窗由用户同意隐私说明并点击开始时触发。
@@ -887,16 +880,13 @@ function AppInner() {
   };
 
   const startMonitoring = async () => {
-    // 防止重复启动：状态机不在 idle（starting/monitoring/stopping）或原生引用仍活跃都直接返回
-    if (monitorRef.current.phase !== 'idle' || useNativeMeterRef.current || recordingRef.current) return;
-    if (stopInFlightRef.current) return;
-    // state 在同一帧内不会立即更新，双击时两次调用都可能通过上面的检查；
-    // 这里用同步 ref 挡住第二次，避免原生 start 被重复调用后把第一次的录音清掉。
-    if (startInFlightRef.current) return;
-    startInFlightRef.current = true;
+    // 防重入：状态机不在 idle（starting/monitoring/stopping）或原生引用仍活跃都直接返回。
+    // 状态机在 sendMonitor 里同步更新 ref，双击的第二次调用会读到 starting。
+    if (!canStartMonitoring(monitorRef.current.phase) || useNativeMeterRef.current || recordingRef.current) {
+      return;
+    }
     if (!sessionsHydrated) {
       Alert.alert('历史记录未加载', '请重启应用后再开始监测，以免覆盖旧记录。');
-      startInFlightRef.current = false;
       return;
     }
     sendMonitor({ type: 'start/begin' });
@@ -910,7 +900,6 @@ function AppInner() {
     if (!permitted) {
       Alert.alert('需要麦克风权限', '请在系统设置中允许本应用使用麦克风，否则无法录音。');
       sendMonitor({ type: 'start/failed' });
-      startInFlightRef.current = false;
       return;
     }
 
@@ -921,7 +910,6 @@ function AppInner() {
         if (freeBytes < MIN_FREE_STORAGE_BYTES) {
           Alert.alert('存储空间不足', '剩余空间不足 1.5GB，可能无法保存整晚录音，请先在设置页清理缓存。');
           sendMonitor({ type: 'start/failed' });
-          startInFlightRef.current = false;
           return;
         }
       } catch {
@@ -1091,8 +1079,6 @@ function AppInner() {
       recordingModeRef.current = undefined;
       setIsFallbackMode(false);
       deactivateKeepAwake('monitor').catch(() => {});
-    } finally {
-      startInFlightRef.current = false;
     }
   };
 
@@ -1125,20 +1111,15 @@ function AppInner() {
 
       // YAMNet 推理窗口 0.975s、轮询 300ms：同一推理结果只计一帧，避免帧统计失真。
       // 原生启动时 windowId 复位为 -1；有效帧必须 >=0，且用 <= 挡住乱序和旧会话迟到帧。
-      if (typeof windowId !== 'number' || windowId < 0) {
-        return;
-      }
-      if (windowId <= lastWindowIdRef.current) {
-        return;
-      }
+      if (!shouldAcceptNativeFrame(phase, windowId, lastWindowIdRef.current)) return;
       lastWindowIdRef.current = windowId;
       if (result.stalled === true) audioStalledRef.current = true;
 
       // 帧级分类收敛到 src/logic/frame.ts：App 与「整晚模拟」测试用同一套规则。
-      // 用 ref 而不是闭包里的 state：监测中改设置后，旧 setTimeout 闭包也能拿到新阈值。
+      // 阈值取本次渲染的 state：轮询路径经 applyNativeResultRef 调用，闭包始终是最新一次渲染的。
       const flags = classifyFrame(
         { topClass: tClass, confidences: confs, amplitudeDb: metering },
-        thresholdsRef.current
+        { snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold }
       );
 
       setIsSnoringNow(flags.loud);
@@ -1194,7 +1175,7 @@ function AppInner() {
     // 原生模块路径：使用 YAMNet 多分类模型（前台走轮询，后台靠上面的事件推送）
     if (useNativeMeterRef.current && AudioMeter) {
       try {
-        applyNativeResult(await AudioMeter.getLatestResult());
+        applyNativeResultRef.current(await AudioMeter.getLatestResult());
       } catch (e) {
         console.warn('原生监测循环异常', e);
       }
@@ -1249,11 +1230,10 @@ function AppInner() {
   };
 
   const stopMonitoring = async () => {
-    if (stopInFlightRef.current || isBusy || !isMonitoring) return;
-    stopInFlightRef.current = true;
+    // 防重入：只有 monitoring 允许停止；stopping 中的重复点击被状态机忽略，不会双结算
+    if (!canStopMonitoring(monitorRef.current.phase)) return;
     // 先切到 stopping：之后任何迟到帧、任何快照写入都不会再影响这次会话
     sendMonitor({ type: 'stop/begin' });
-    try {
     if (monitorTimerRef.current) {
       clearTimeout(monitorTimerRef.current);
       monitorTimerRef.current = null;
@@ -1386,9 +1366,6 @@ function AppInner() {
     setIsSnoringNow(false);
     setElapsedSeconds(0);
     deactivateKeepAwake('monitor').catch(() => {});
-    } finally {
-      stopInFlightRef.current = false;
-    }
   };
 
   const deleteSession = async (id: string) => {
