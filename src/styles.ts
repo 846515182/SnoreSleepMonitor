@@ -624,7 +624,9 @@ export const makeStyles = (T: Theme) =>
     },
     emptyRecordingBox: {
       alignItems: 'center',
-      backgroundColor: T.tile,
+      backgroundColor: T.card,
+      borderWidth: 1,
+      borderColor: T.border,
       borderRadius: radius.md,
       paddingVertical: spacing.xl,
       gap: spacing.sm,
@@ -891,39 +893,6 @@ export const makeStyles = (T: Theme) =>
       fontSize: fontSize.section,
       fontWeight: fontWeight.heavy,
       color: T.primaryText,
-    },
-
-    // ————————————————— 过渡：旧详情/设置/同意页仍在使用的键（下一次提交移除） —————————————————
-    header: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: spacing.lg,
-      paddingTop: (RNStatusBar.currentHeight || 0) + spacing.md,
-      paddingBottom: spacing.md,
-      backgroundColor: T.card,
-      borderBottomWidth: 1,
-      borderBottomColor: T.border,
-    },
-    heroCard: {
-      ...surface(T),
-      borderRadius: radius.xl,
-      padding: spacing.lg,
-      gap: spacing.md,
-      overflow: 'hidden',
-    },
-    heroAccentBar: {
-      position: 'absolute',
-      top: 0,
-      left: 0,
-      right: 0,
-      height: 3,
-      backgroundColor: T.primary,
-    },
-    heroHeader: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.md,
     },
   });
 

@@ -45,6 +45,7 @@ import {
   getApneaRiskColor,
   getApneaRiskLabel,
   getEventColor,
+  getEventTextColor,
   getEventLabel,
   getQualityColor,
 } from './src/utils/labels';
@@ -56,6 +57,7 @@ import { SettingHeader, SettingSection } from './src/components/SettingSection';
 import { HistoryRow } from './src/components/HistoryRow';
 import { ScreenHeader } from './src/components/ScreenHeader';
 import { InfoBanner } from './src/components/InfoBanner';
+import { MetricRow } from './src/components/MetricRow';
 import {
   cancelActiveDownload,
   cleanAppCache,
@@ -1777,16 +1779,13 @@ function AppInner() {
   /** 首次启动隐私同意页：同意前不进入主界面，也绝不请求任何系统权限 */
   const renderConsent = () => (
     <ScrollView contentContainerStyle={styles.homeContent} showsVerticalScrollIndicator={false}>
-      <View style={styles.heroCard}>
-        <View style={styles.heroAccentBar} />
-        <View style={styles.heroHeader}>
-          <View style={styles.appIconCircle}>
-            <Ionicons name="moon" size={26} color={T.onAccent} />
-          </View>
-          <View style={styles.heroTitleBlock}>
-            <Text style={styles.title}>欢迎使用睡眠监测</Text>
-            <Text style={styles.subtitle}>v{CURRENT_VERSION} · 开始前请先了解隐私说明</Text>
-          </View>
+      <View style={styles.appBar}>
+        <View style={styles.appIconCircle}>
+          <Ionicons name="moon" size={26} color={T.onAccent} />
+        </View>
+        <View style={styles.heroTitleBlock}>
+          <Text style={styles.title}>欢迎使用睡眠监测</Text>
+          <Text style={styles.subtitle}>v{CURRENT_VERSION} · 开始前请先了解隐私说明</Text>
         </View>
       </View>
 
@@ -1809,7 +1808,7 @@ function AppInner() {
         onPress={acceptPrivacy}
         activeOpacity={0.85}
       >
-        <Ionicons name="checkmark-circle" size={20} color={T.onAccent} style={{ marginRight: 8 }} />
+        <Ionicons name="checkmark-circle" size={20} color={T.onAccent} />
         <Text style={styles.mainButtonText}>同意并继续</Text>
       </TouchableOpacity>
 
@@ -2062,19 +2061,13 @@ function AppInner() {
     const hasSnoreClips = snoreClips.length > 0;
     const clipPlaying = isPlaying && clipIndex >= 0;
     return (
-      <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
-        <View style={styles.header}>
-          <TouchableOpacity onPress={() => setScreen('history')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Ionicons name="chevron-back" size={26} color={T.primary} />
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>记录详情</Text>
-          <View style={{ width: 40 }} />
-        </View>
-
+      <View style={styles.flex}>
+        <ScreenHeader title="记录详情" onBack={() => setScreen('history')} T={T} styles={styles} />
+        <ScrollView style={styles.flex} contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
         <View style={styles.card}>
           <View style={styles.detailHeader}>
             <View style={[styles.detailIconCircle, { backgroundColor: `${T.primary}15` }]}>
-              <Ionicons name="moon-outline" size={24} color={T.primary} />
+              <Ionicons name="moon-outline" size={24} color={T.primaryText} />
             </View>
             <View>
               <Text style={styles.detailTime}>{formatTime(selectedSession.startTime)}</Text>
@@ -2083,157 +2076,162 @@ function AppInner() {
           </View>
 
           {selectedSession.interrupted && (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                marginTop: 10,
-                paddingHorizontal: 10,
-                paddingVertical: 8,
-                borderRadius: 8,
-                backgroundColor: `${T.warning}15`,
-              }}
-            >
-              <Ionicons name="alert-circle-outline" size={16} color={T.warning} />
-              <Text style={{ marginLeft: 6, color: T.warning, fontSize: 12, flex: 1 }}>
-                上次监测中途中断，事件记录可能不完整；音频末尾可能缺失。
-              </Text>
-            </View>
+            <InfoBanner
+              variant="warning"
+              icon="alert-circle-outline"
+              message="上次监测中途中断，事件记录可能不完整；音频末尾可能缺失。"
+              styles={styles}
+              T={T}
+            />
           )}
 
+          {/* 计数格：四类事件次数，同一行等宽，彼此用 1px 分隔线 */}
           <View style={styles.detailStatsGrid}>
             {(
               [
-                { icon: 'volume-high-outline', color: T.snore, value: selectedSession.snoreCount, label: '打鼾' },
-                { icon: 'git-branch-outline', color: T.grind, value: selectedSession.grindCount, label: '磨牙' },
-                { icon: 'chatbubble-outline', color: T.talk, value: selectedSession.talkCount, label: '梦话' },
-                { icon: 'pulse-outline', color: T.apnea, value: selectedSession.apneaCount, label: '呼吸暂停' },
-                { icon: 'volume-medium-outline', color: T.warning, value: formatDuration(selectedSession.totalSnoreSeconds), label: '鼾声时长' },
-                { icon: 'git-branch-outline', color: T.grind, value: formatDuration(selectedSession.totalGrindSeconds), label: '磨牙时长' },
-                { icon: 'chatbubble-outline', color: T.talk, value: formatDuration(selectedSession.totalTalkSeconds), label: '梦话时长' },
-                { icon: 'pulse-outline', color: T.apnea, value: formatDuration(selectedSession.totalApneaSeconds), label: '呼吸暂停时长' },
-                { icon: 'list-outline', color: T.textSecondary, value: selectedSession.events.length, label: '事件总数' },
+                { icon: 'volume-high-outline', color: T.snoreText, value: selectedSession.snoreCount, label: '打鼾' },
+                { icon: 'git-branch-outline', color: T.grindText, value: selectedSession.grindCount, label: '磨牙' },
+                { icon: 'chatbubble-outline', color: T.talkText, value: selectedSession.talkCount, label: '梦话' },
+                { icon: 'pulse-outline', color: T.apneaText, value: selectedSession.apneaCount, label: '呼吸暂停' },
               ] as const
-            ).map((item) => (
-              <StatCard key={item.label} variant="detail" styles={styles} {...item} />
+            ).map((item, idx) => (
+              <React.Fragment key={item.label}>
+                {idx > 0 && <View style={styles.statDivider} />}
+                <StatCard variant="detail" styles={styles} {...item} />
+              </React.Fragment>
             ))}
           </View>
 
-          <View style={[styles.qualityBadgeLarge, { backgroundColor: getQualityColor(selectedSession.qualityScore, T), marginBottom: 10 }]}>
-            <Text style={styles.qualityTextLarge}>睡眠质量 {selectedSession.qualityScore} 分</Text>
+          <View style={styles.badgePair}>
+            <View style={[styles.qualityBadgeLarge, { backgroundColor: getQualityColor(selectedSession.qualityScore, T) }]}>
+              <Text style={styles.qualityTextLarge}>睡眠质量 {selectedSession.qualityScore} 分</Text>
+            </View>
+            <View style={[styles.qualityBadgeLarge, { backgroundColor: getApneaRiskColor(selectedSession.apneaRisk || 'low', T) }]}>
+              <Text style={styles.qualityTextLarge}>呼吸暂停风险 {getApneaRiskLabel(selectedSession.apneaRisk || 'low')}</Text>
+            </View>
           </View>
 
-          <View style={[styles.qualityBadgeLarge, { backgroundColor: getApneaRiskColor(selectedSession.apneaRisk || 'low', T) }]}>
-            <Text style={styles.qualityTextLarge}>呼吸暂停风险 {getApneaRiskLabel(selectedSession.apneaRisk || 'low')}</Text>
+          {/* 时长与事件总数为次要信息，改用行式列表，弱于上方计数格 */}
+          <View style={styles.metricList}>
+            <MetricRow icon="volume-medium-outline" color={T.snoreText} label="鼾声时长" value={formatDuration(selectedSession.totalSnoreSeconds)} styles={styles} />
+            <MetricRow icon="git-branch-outline" color={T.grindText} label="磨牙时长" value={formatDuration(selectedSession.totalGrindSeconds)} styles={styles} />
+            <MetricRow icon="chatbubble-outline" color={T.talkText} label="梦话时长" value={formatDuration(selectedSession.totalTalkSeconds)} styles={styles} />
+            <MetricRow icon="pulse-outline" color={T.apneaText} label="呼吸暂停时长" value={formatDuration(selectedSession.totalApneaSeconds)} styles={styles} />
+            <MetricRow icon="list-outline" color={T.textSecondary} label="事件总数" value={selectedSession.events.length} divider={false} styles={styles} />
           </View>
 
           <Text style={styles.disclaimerText}>
             呼吸暂停筛查基于连续无声时长估算，仅供参考，不构成医疗诊断；如有疑虑请就医进行专业睡眠监测（多导睡眠图）。
           </Text>
 
-          {selectedSession.intensityBreakdown && selectedSession.snoreCount > 0 && (
-            <View style={{ marginBottom: 24 }}>
-              <Text style={styles.sectionTitle}>
-                <Ionicons name="stats-chart-outline" size={16} color={T.text} /> 鼾声强度分布
-              </Text>
-              <View style={styles.intensityRow}>
-                <View style={[styles.intensityBlock, { backgroundColor: `${T.success}20` }]}>
-                  <Text style={[styles.detailStatValue, { color: T.success }]}>{selectedSession.intensityBreakdown.mild}</Text>
-                  <Text style={styles.detailStatLabel}>轻度</Text>
-                </View>
-                <View style={[styles.intensityBlock, { backgroundColor: `${T.warning}20` }]}>
-                  <Text style={[styles.detailStatValue, { color: T.warning }]}>{selectedSession.intensityBreakdown.moderate}</Text>
-                  <Text style={styles.detailStatLabel}>中度</Text>
-                </View>
-                <View style={[styles.intensityBlock, { backgroundColor: `${T.danger}20` }]}>
-                  <Text style={[styles.detailStatValue, { color: T.danger }]}>{selectedSession.intensityBreakdown.severe}</Text>
-                  <Text style={styles.detailStatLabel}>重度</Text>
-                </View>
+        </View>
+
+        {selectedSession.intensityBreakdown && selectedSession.snoreCount > 0 && (
+          <View style={styles.card}>
+            <View style={styles.sectionTitleRow}>
+              <Ionicons name="stats-chart-outline" size={16} color={T.text} />
+              <Text style={styles.sectionTitle}>鼾声强度分布</Text>
+            </View>
+            <View style={styles.intensityRow}>
+              <View style={[styles.intensityBlock, { backgroundColor: `${T.success}20` }]}>
+                <Text style={[styles.detailStatValue, { color: T.successText }]}>{selectedSession.intensityBreakdown.mild}</Text>
+                <Text style={styles.detailStatLabel}>轻度</Text>
+              </View>
+              <View style={[styles.intensityBlock, { backgroundColor: `${T.warning}20` }]}>
+                <Text style={[styles.detailStatValue, { color: T.warningText }]}>{selectedSession.intensityBreakdown.moderate}</Text>
+                <Text style={styles.detailStatLabel}>中度</Text>
+              </View>
+              <View style={[styles.intensityBlock, { backgroundColor: `${T.danger}20` }]}>
+                <Text style={[styles.detailStatValue, { color: T.dangerText }]}>{selectedSession.intensityBreakdown.severe}</Text>
+                <Text style={styles.detailStatLabel}>重度</Text>
               </View>
             </View>
-          )}
+          </View>
+        )}
 
-          {selectedSession.recordingUri ? (
-            <View style={styles.recordingBox}>
-              <Text style={styles.sectionTitle}>
-                <Ionicons name="mic-outline" size={16} color={T.text} /> 录音回放
+        {selectedSession.recordingUri ? (
+          <View style={styles.card}>
+            <View style={styles.sectionTitleRow}>
+              <Ionicons name="mic-outline" size={16} color={T.text} />
+              <Text style={styles.sectionTitle}>录音回放</Text>
+            </View>
+            <TouchableOpacity
+              style={[
+                styles.mainButton,
+                isPlaying && clipIndex < 0 ? styles.stopButton : styles.startButton,
+              ]}
+              onPress={toggleFullPlayback}
+            >
+              <Ionicons
+                name={isPlaying && clipIndex < 0 ? 'square' : 'play'}
+                size={18}
+                color={T.onAccent}
+              />
+              <Text style={styles.mainButtonText}>
+                {isPlaying && clipIndex < 0 ? '停止播放' : '播放录音'}
               </Text>
-              <TouchableOpacity
-                style={[
-                  styles.mainButton,
-                  isPlaying && clipIndex < 0 ? styles.stopButton : styles.startButton,
-                ]}
-                onPress={toggleFullPlayback}
-              >
-                <Ionicons
-                  name={isPlaying && clipIndex < 0 ? 'square' : 'play'}
-                  size={18}
-                  color={T.onAccent}
-                  style={{ marginRight: 8 }}
-                />
-                <Text style={styles.mainButtonText}>
-                  {isPlaying && clipIndex < 0 ? '停止播放' : '播放录音'}
-                </Text>
-              </TouchableOpacity>
+            </TouchableOpacity>
 
-              {/* 一键连播当晚所有鼾声片段（C 方案新功能） */}
-              <TouchableOpacity
-                style={[styles.clipButton, hasSnoreClips ? null : styles.clipButtonDisabled]}
-                disabled={!hasSnoreClips}
-                onPress={() => (clipPlaying ? stopPlayback() : startClipPlayback())}
-                activeOpacity={0.85}
-              >
-                <Ionicons name="albums-outline" size={18} color={T.primary} style={{ marginRight: 8 }} />
-                <Text style={styles.clipButtonText}>
-                  {clipPlaying
-                    ? `停止连播（第 ${clipIndex + 1}/${clipEvents.length} 段）`
-                    : hasSnoreClips
-                      ? `连播鼾声（${snoreClips.length} 段）`
-                      : '暂无鼾声片段'}
-                </Text>
-              </TouchableOpacity>
-              {clipPlaying && (
-                <Text style={styles.clipProgressText}>
-                  正在播放第 {clipIndex + 1}/{clipEvents.length} 段鼾声
-                </Text>
-              )}
-              {playbackDurMs > 0 && (
-                <View style={{ marginTop: 16 }}>
-                  <View style={styles.volumeBarBg}>
-                    <View
-                      style={[
-                        styles.volumeBarFill,
-                        {
-                          width: `${Math.min(100, (playbackPosMs / playbackDurMs) * 100)}%`,
-                          backgroundColor: T.primary,
-                        },
-                      ]}
-                    />
-                  </View>
-                  <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 6 }}>
-                    <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackPosMs / 1000))}</Text>
-                    <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackDurMs / 1000))}</Text>
-                  </View>
+            {/* 一键连播当晚所有鼾声片段（C 方案新功能） */}
+            <TouchableOpacity
+              style={[styles.clipButton, hasSnoreClips ? null : styles.clipButtonDisabled]}
+              disabled={!hasSnoreClips}
+              onPress={() => (clipPlaying ? stopPlayback() : startClipPlayback())}
+              activeOpacity={0.85}
+            >
+              <Ionicons name="albums-outline" size={18} color={T.primaryText} />
+              <Text style={styles.clipButtonText}>
+                {clipPlaying
+                  ? `停止连播（第 ${clipIndex + 1}/${clipEvents.length} 段）`
+                  : hasSnoreClips
+                    ? `连播鼾声（${snoreClips.length} 段）`
+                    : '暂无鼾声片段'}
+              </Text>
+            </TouchableOpacity>
+            {clipPlaying && (
+              <Text style={styles.clipProgressText}>
+                正在播放第 {clipIndex + 1}/{clipEvents.length} 段鼾声
+              </Text>
+            )}
+            {playbackDurMs > 0 && (
+              <View style={styles.recordingBox}>
+                <View style={styles.volumeBarBg}>
+                  <View
+                    style={[
+                      styles.volumeBarFill,
+                      {
+                        width: `${Math.min(100, (playbackPosMs / playbackDurMs) * 100)}%`,
+                        backgroundColor: T.primary,
+                      },
+                    ]}
+                  />
                 </View>
-              )}
-            </View>
-          ) : (
-            <View style={styles.emptyRecordingBox}>
-              <Ionicons name="mic-off-outline" size={32} color={T.textTertiary} />
-              <Text style={styles.noRecordingText}>暂无录音可回放</Text>
-            </View>
-          )}
+                <View style={styles.volumeRow}>
+                  <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackPosMs / 1000))}</Text>
+                  <Text style={styles.volumeDb}>{formatDuration(Math.floor(playbackDurMs / 1000))}</Text>
+                </View>
+              </View>
+            )}
+          </View>
+        ) : (
+          <View style={styles.emptyRecordingBox}>
+            <Ionicons name="mic-off-outline" size={32} color={T.textTertiary} />
+            <Text style={styles.noRecordingText}>暂无录音可回放</Text>
+          </View>
+        )}
 
-          <Text style={styles.sectionTitle}>
-            <Ionicons name="list-outline" size={16} color={T.text} /> 异常声音事件
-          </Text>
+        <View style={styles.card}>
+          <View style={styles.sectionTitleRow}>
+            <Ionicons name="list-outline" size={16} color={T.text} />
+            <Text style={styles.sectionTitle}>异常声音事件</Text>
+          </View>
           {selectedSession.eventsTruncated && (
             <Text style={styles.disclaimerText}>当晚事件过多，仅保留前 {MAX_EVENTS_PER_SESSION} 条。</Text>
           )}
           {selectedSession.events.length === 0 ? (
             <View style={styles.emptyEventBox}>
               <View style={[styles.eventIconCircle, { backgroundColor: `${T.success}15` }]}>
-                <Ionicons name="checkmark-circle-outline" size={24} color={T.success} />
+                <Ionicons name="checkmark-circle-outline" size={24} color={T.successText} />
               </View>
               <Text style={styles.noRecordingText}>未检测到异常声音事件</Text>
             </View>
@@ -2276,7 +2274,7 @@ function AppInner() {
                       <Ionicons name={iconName as any} size={18} color={getEventColor(evt.type, T)} />
                     </View>
                     <View style={styles.eventBody}>
-                      <Text style={[styles.eventIndex, { color: getEventColor(evt.type, T) }]}>
+                      <Text style={[styles.eventIndex, { color: getEventTextColor(evt.type, T) }]}>
                         #{idx + 1} {getEventLabel(evt.type, evt.intensity)}
                       </Text>
                       <Text style={styles.eventClock}>{formatClock(absStart)} · {(evt.duration / 1000).toFixed(1)}秒</Text>
@@ -2286,7 +2284,7 @@ function AppInner() {
                       (selectedSession.recordingMode === 'snore' && typeof evt.playStart !== 'number') ? (
                         <Ionicons name="volume-mute-outline" size={24} color={T.textTertiary} />
                       ) : (
-                        <Ionicons name="play-circle-outline" size={24} color={T.primary} />
+                        <Ionicons name="play-circle-outline" size={24} color={T.primaryText} />
                       ))}
                   </TouchableOpacity>
                 );
@@ -2299,30 +2297,30 @@ function AppInner() {
               )}
             </View>
           )}
-
-          <View style={{ height: 16 }} />
-          <TouchableOpacity
-            style={[styles.mainButton, styles.stopButton]}
-            onPress={() =>
-              Alert.alert('确认删除', '删除后无法恢复，录音也将被删除。', [
-                { text: '取消', style: 'cancel' },
-                {
-                  text: '删除',
-                  style: 'destructive',
-                  onPress: async () => {
-                    await deleteSession(selectedSession.id);
-                    setSelectedSession(null);
-                    setScreen('history');
-                  },
-                },
-              ])
-            }
-          >
-            <Ionicons name="trash-outline" size={18} color={T.onAccent} style={{ marginRight: 8 }} />
-            <Text style={styles.mainButtonText}>删除此记录</Text>
-          </TouchableOpacity>
         </View>
-      </ScrollView>
+
+        <TouchableOpacity
+          style={styles.deleteButton}
+          onPress={() =>
+            Alert.alert('确认删除', '删除后无法恢复，录音也将被删除。', [
+              { text: '取消', style: 'cancel' },
+              {
+                text: '删除',
+                style: 'destructive',
+                onPress: async () => {
+                  await deleteSession(selectedSession.id);
+                  setSelectedSession(null);
+                  setScreen('history');
+                },
+              },
+            ])
+          }
+        >
+          <Ionicons name="trash-outline" size={18} color={T.onAccent} />
+          <Text style={styles.mainButtonText}>删除此记录</Text>
+        </TouchableOpacity>
+        </ScrollView>
+      </View>
     );
   };
 
@@ -2335,10 +2333,10 @@ function AppInner() {
     apnea: apneaThreshold,
   };
   const thresholdColors: Record<ThresholdTab, string> = {
-    snore: T.snore,
-    grind: T.grind,
-    talk: T.talk,
-    apnea: T.apnea,
+    snore: T.snoreText,
+    grind: T.grindText,
+    talk: T.talkText,
+    apnea: T.apneaText,
   };
   const activeValue = thresholdValues[thresholdTab];
   const activeColor = thresholdColors[thresholdTab];
@@ -2367,15 +2365,9 @@ function AppInner() {
 
 
   const renderSettings = () => (
-    <ScrollView style={styles.flex} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => setScreen('home')} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Ionicons name="chevron-back" size={26} color={T.primary} />
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>设置</Text>
-        <View style={{ width: 40 }} />
-      </View>
-
+    <View style={styles.flex}>
+      <ScreenHeader title="设置" onBack={() => setScreen('home')} T={T} styles={styles} />
+      <ScrollView style={styles.flex} contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
       <View style={styles.card}>
         <View style={styles.settingSection}>
           <SettingHeader icon="options-outline" color={activeColor} title="检测阈值" styles={styles} />
@@ -2389,7 +2381,7 @@ function AppInner() {
             activeColor={activeColor}
           />
 
-          <Text style={[styles.settingsDesc, { marginTop: 12 }]}>{activeTab.desc}</Text>
+          <Text style={styles.settingsDesc}>{activeTab.desc}</Text>
           <Text style={styles.thresholdValue}>{activeDisplay}</Text>
           <View style={styles.sliderRow}>
             <TouchableOpacity
@@ -2416,7 +2408,7 @@ function AppInner() {
         </View>
 
         <TouchableOpacity
-          style={[styles.actionButton, { backgroundColor: T.textTertiary, marginTop: 8 }]}
+          style={styles.secondaryButton}
           onPress={() => {
             setSnoreThreshold(DEFAULT_SNORE_CONFIDENCE);
             setGrindThreshold(DEFAULT_GRIND_CONFIDENCE);
@@ -2430,15 +2422,15 @@ function AppInner() {
             );
           }}
         >
-          <Ionicons name="refresh-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
-          <Text style={styles.actionButtonText}>恢复默认</Text>
+          <Ionicons name="refresh-outline" size={16} color={T.secondaryFg} />
+          <Text style={styles.secondaryButtonText}>恢复默认</Text>
         </TouchableOpacity>
       </View>
 
       {/* 通用设置：原先四张独立卡片合并为一张，分隔线分区，按钮紧凑化 */}
-      <View style={[styles.card, { marginTop: 16 }]}>
+      <View style={styles.card}>
         <View style={styles.settingSection}>
-          <SettingHeader icon="cloud-download-outline" color={T.primary} title="应用更新" styles={styles} />
+          <SettingHeader icon="cloud-download-outline" color={T.primaryText} title="应用更新" styles={styles} />
           <View style={styles.versionRow}>
             <Text style={styles.settingsDesc}>当前版本 {CURRENT_VERSION}</Text>
             {updateCheckState === 'available' && latestRelease && (
@@ -2449,10 +2441,10 @@ function AppInner() {
           </View>
           {updateCheckState === 'available' && latestRelease && (
             <TouchableOpacity
-              style={[styles.actionButton, { backgroundColor: T.primary, marginBottom: 8 }]}
+              style={[styles.actionButton, { backgroundColor: T.primary }]}
               onPress={() => startApkInstall(latestRelease)}
             >
-              <Ionicons name="download-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+              <Ionicons name="download-outline" size={16} color={T.onAccent} />
               <Text style={styles.actionButtonText}>下载最新版本 APK</Text>
             </TouchableOpacity>
           )}
@@ -2465,7 +2457,7 @@ function AppInner() {
             onPress={() => checkUpdate(true)}
             disabled={updateCheckState === 'checking'}
           >
-            <Ionicons name="refresh-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Ionicons name="refresh-outline" size={16} color={T.onAccent} />
             <Text style={styles.actionButtonText}>
               {updateCheckState === 'checking' ? '检查中…' : '检查更新'}
             </Text>
@@ -2476,7 +2468,7 @@ function AppInner() {
 
         <SettingSection
           icon="color-palette-outline"
-          color={T.primary}
+          color={T.primaryText}
           title="外观主题"
           description="夜间建议使用深色，设置立即生效并只保存在本机。"
           styles={styles}
@@ -2497,7 +2489,7 @@ function AppInner() {
 
         <SettingSection
           icon="lock-closed-outline"
-          color={T.success}
+          color={T.successText}
           title="隐私与数据"
           description="录音与识别全在本机完成，不上传数据；录音保留 3 天自动清理，历史记录仅存于本机。"
           styles={styles}
@@ -2506,7 +2498,7 @@ function AppInner() {
             style={[styles.actionButton, { backgroundColor: T.primary }]}
             onPress={openPrivacyPolicy}
           >
-            <Ionicons name="document-text-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Ionicons name="document-text-outline" size={16} color={T.onAccent} />
             <Text style={styles.actionButtonText}>查看隐私政策</Text>
           </TouchableOpacity>
         </SettingSection>
@@ -2515,7 +2507,7 @@ function AppInner() {
 
         <SettingSection
           icon="battery-charging-outline"
-          color={T.danger}
+          color={T.dangerText}
           title="后台运行"
           description="息屏后持续录音需允许后台运行，部分品牌（小米 / 华为 / OPPO / vivo）还需在省电策略中关闭限制。"
           styles={styles}
@@ -2524,7 +2516,7 @@ function AppInner() {
             style={[styles.actionButton, { backgroundColor: T.danger }]}
             onPress={openBatterySettings}
           >
-            <Ionicons name="shield-checkmark-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Ionicons name="shield-checkmark-outline" size={16} color={T.onAccent} />
             <Text style={styles.actionButtonText}>去设置后台权限</Text>
           </TouchableOpacity>
         </SettingSection>
@@ -2532,12 +2524,12 @@ function AppInner() {
         <View style={styles.divider} />
 
         <View style={styles.settingSection}>
-          <SettingHeader icon="trash-outline" color={T.warning} title="存储空间" styles={styles} />
+          <SettingHeader icon="trash-outline" color={T.warningText} title="存储空间" styles={styles} />
           <Text style={styles.settingsDesc}>
             清理过期录音和缓存，释放空间（历史记录不会被删除）。
           </Text>
 
-          <SettingHeader icon="save-outline" color={T.snore} title="保存录音" marginTop={4} styles={styles} />
+          <SettingHeader icon="save-outline" color={T.snoreText} title="保存录音" styles={styles} />
           <Text style={styles.settingsDesc}>
             默认只保存「打呼噜的片段」：每段前后各留一点上下文，没打呼噜的部分直接丢掉，
             一晚上通常只有几十 MB。关闭后完全不写入音频，鼾声统计照常，但该晚无法回放。
@@ -2563,7 +2555,6 @@ function AppInner() {
                 icon="albums-outline"
                 color={T.textSecondary}
                 title="保留整晚原始录音"
-                marginTop={14}
                 styles={styles}
               />
               <Text style={styles.settingsDesc}>
@@ -2582,9 +2573,8 @@ function AppInner() {
 
               <SettingHeader
                 icon="options-outline"
-                color={T.success}
+                color={T.successText}
                 title="录音降噪"
-                marginTop={14}
                 styles={styles}
               />
               <Text style={styles.settingsDesc}>
@@ -2603,7 +2593,7 @@ function AppInner() {
           )}
 
           <TouchableOpacity
-            style={[styles.actionButton, { backgroundColor: T.warning, marginTop: 12 }]}
+            style={[styles.actionButton, { backgroundColor: T.warning }]}
             onPress={async () => {
               try {
                 await cleanOldRecordings();
@@ -2614,12 +2604,13 @@ function AppInner() {
               }
             }}
           >
-            <Ionicons name="sparkles-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
+            <Ionicons name="sparkles-outline" size={16} color={T.onAccent} />
             <Text style={styles.actionButtonText}>清理缓存</Text>
           </TouchableOpacity>
         </View>
       </View>
-    </ScrollView>
+      </ScrollView>
+    </View>
   );
 
   return (
@@ -2639,7 +2630,7 @@ function AppInner() {
         <View style={styles.modalOverlay}>
           <View style={styles.updateModal}>
             <View style={styles.updateIconCircle}>
-              <Ionicons name="cloud-download-outline" size={32} color={T.primary} />
+              <Ionicons name="cloud-download-outline" size={32} color={T.primaryText} />
             </View>
             <Text style={styles.updateModalTitle}>正在下载更新</Text>
             <Text style={styles.updateModalStatus}>{downloadStatus}</Text>
