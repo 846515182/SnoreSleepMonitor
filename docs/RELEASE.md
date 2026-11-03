@@ -8,12 +8,14 @@
 
 ## 发布一个版本
 
-版本号**只改 `package.json` 一处**，`versionCode`、Expo `version`、App 内显示版本
-全部由 `app.config.js` 自动推导。
+版本号必须同步修改 `package.json` 与 `app.json` 两处（`expo.version`）。`build-apk.yml`
+会校验 `tag == v(package.json.version)` 且 `app.json.version == package.json.version`；
+`versionCode` 由 `app.config.js` 自动推导，无需手改。
 
 ```bash
-# 1. 改版本（例：1.3.0）
+# 1. 改版本（例：1.3.0）——两处必须一致
 #    package.json -> "version": "1.3.0"
+#    app.json     -> "expo": { "version": "1.3.0", ... }
 
 # 2. 更新 CHANGELOG.md：把待发布小节标题改为 ## vX.Y.Z - YYYY-MM-DD
 
@@ -21,6 +23,7 @@
 npm ci
 npm run typecheck
 npm test
+npx expo config --type public | grep -E '"version"|"permissions"'
 
 # 4. 提交并打 tag（tag 必须是 v + package.json 版本，否则 CI 直接失败）
 git add -A
@@ -28,6 +31,10 @@ git commit -m "release: v1.3.0"
 git tag v1.3.0
 git push origin main --tags
 ```
+
+> 本地 `assembleRelease` 仅用于验证，**产物不可直接分发**：签名护栏要求
+> `android/app/release.keystore` + `RELEASE_STORE_PASSWORD/RELEASE_KEY_ALIAS/RELEASE_KEY_PASSWORD`
+> （CI 用 `STORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD`），缺少时构建直接失败，不再产出 debug 签名包。
 
 tag push 触发 `build-apk.yml`：
 

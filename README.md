@@ -35,11 +35,16 @@ npm start           # expo start
 
 测试栈刻意只用 `tsc` + Node 内置 `node --test`：不引入 jest/eslint，避免 lockfile 抖动。
 
-## 版本号（单一来源）
+## 版本号（两处必须同步）
 
-**只改 `package.json` 的 `version`**：`app.config.js` 会据此推导 Expo `version` 与 Android
-`versionCode`（`major*10000 + minor*100 + patch`），App 内显示的版本号通过 `expo-constants` 读取，
-三处永远一致。
+`package.json` 的 `version` 是版本比较与 App 内显示（`expo-constants`）的唯一来源；`app.json`
+的 `expo.version` 必须与它保持一致。`build-apk.yml` 会同时校验：
+
+- `tag == "v" + package.json.version`
+- `app.json.expo.version == package.json.version`
+
+任一不一致都会直接构建失败。Android `versionCode` 由 `app.config.js` 按
+`major*10000 + minor*100 + patch` 推导，无需手改。
 
 ## 构建与发布
 
@@ -53,13 +58,20 @@ npm start           # expo start
 | `RELEASE_KEY_ALIAS` | 别名（如 `snoresleep`） |
 | `RELEASE_KEY_PASSWORD` | 与 `RELEASE_KEYSTORE_PASSWORD` 相同（PKCS12 不支持独立 keypass） |
 
-本地构建：
+本地构建（仅用于验证，**产物不可直接分发**）：
 
 ```bash
 npm ci
 npx expo prebuild --platform android
+# 必须提供正式签名材料，否则 assembleRelease 由签名护栏直接失败：
+#   android/app/release.keystore
+#   RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
 cd android && ./gradlew assembleRelease
 ```
+
+本地构建使用自己的 keystore，证书与官方发布包不一致：既不能覆盖安装官方版本，
+也不应作为分发渠道。`plugins/withReleaseSigning.js` 会在 prebuild 时写入护栏，
+缺少签名材料时不会静默产出 debug 签名包。
 
 发布：改版本 → 更新 CHANGELOG → 打 `vX.Y.Z` tag 并推送，
 `build-apk.yml` 会校验 tag 与 `package.json` 一致、跑测试、构建并创建 GitHub Release
