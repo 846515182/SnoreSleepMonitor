@@ -86,27 +86,10 @@ jobs:
           echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 -d > android/app/release.keystore
           test -s android/app/release.keystore
 
-      - name: Inject release signing config
-        run: |
-          cat >> android/app/build.gradle << EOF
-
-          // Release signing (keystore provided via GitHub Secrets, never committed).
-          android {
-              signingConfigs {
-                  release {
-                      storeFile file('release.keystore')
-                      storePassword System.getenv("STORE_PASSWORD")
-                      keyAlias System.getenv("KEY_ALIAS")
-                      keyPassword System.getenv("KEY_PASSWORD")
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.release
-                  }
-              }
-          }
-          EOF
+      # 签名配置由 plugins/withReleaseSigning.js 在 prebuild 时写入 build.gradle：
+      # 缺少 keystore / STORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD 时 assembleRelease 直接失败。
+      - name: Assert release signing config was injected
+        run: grep -q "SNORE_RELEASE_SIGNING_GUARD" android/app/build.gradle
 
       - name: Build Release APK
         id: build-release-apk

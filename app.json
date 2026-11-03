@@ -31,6 +31,13 @@
         "android.permission.FOREGROUND_SERVICE_MICROPHONE",
         "android.permission.POST_NOTIFICATIONS",
         "android.permission.REQUEST_INSTALL_PACKAGES"
+      ],
+      "allowBackup": false,
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.VIBRATE"
       ]
     },
     "web": {
@@ -43,7 +50,8 @@
           "microphonePermission": "睡眠监测需要访问麦克风以录制鼾声和环境音。"
         }
       ],
-      "./plugins/withAudioMeter.js"
+      "./plugins/withAudioMeter.js",
+      "./plugins/withReleaseSigning.js"
     ]
   }
 }
