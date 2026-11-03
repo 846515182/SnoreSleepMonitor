@@ -827,3 +827,5 @@ export const makeStyles = (T: Theme) =>
     fontWeight: '700',
   },
   });
+
+export type AppStyles = ReturnType<typeof makeStyles>;

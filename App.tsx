@@ -40,7 +40,7 @@ import { SoundEventDetector } from './src/logic/detector';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
 import { isRecordingExpired } from './src/logic/retention';
-import { formatBytes, formatClock, formatDuration, formatTime } from './src/utils/format';
+import { formatClock, formatDuration, formatTime } from './src/utils/format';
 import {
   getApneaRiskColor,
   getApneaRiskLabel,
@@ -50,6 +50,17 @@ import {
 } from './src/utils/labels';
 import { resolveTheme } from './src/theme';
 import { makeStyles } from './src/styles';
+import { StatCard } from './src/components/StatCard';
+import { SegmentControl } from './src/components/SegmentControl';
+import { SettingHeader, SettingSection } from './src/components/SettingSection';
+import { HistoryRow } from './src/components/HistoryRow';
+import {
+  cancelActiveDownload,
+  cleanAppCache,
+  downloadAndInstallApk,
+  fetchLatestRelease,
+  type LatestRelease,
+} from './src/services/updater';
 
 // 原生音频模块（Android 专用：AudioRecord 录音 + YAMNet 本地推理）
 const AudioMeter = NativeModules.AudioMeter;
@@ -59,12 +70,7 @@ const AudioMeter = NativeModules.AudioMeter;
 // 常量
 /** 版本号由 app.config.js 从 package.json 注入，消除三处硬编码漂移 */
 const CURRENT_VERSION = (Constants.expoConfig?.version as string) || '0.0.0';
-const GITHUB_OWNER = '846515182';
-const GITHUB_REPO = 'SnoreSleepMonitor';
-const GITHUB_RELEASE_API = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest`;
-/** 更新包只接受本仓库 Releases 下发的地址（防止接口被投毒后下载到第三方 APK） */
-const EXPECTED_DOWNLOAD_PREFIX = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/`;
-const PRIVACY_POLICY_URL = `https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/blob/main/PRIVACY.md`;
+const PRIVACY_POLICY_URL = 'https://github.com/846515182/SnoreSleepMonitor/blob/main/PRIVACY.md';
 /** 首次启动同意页与设置页共用的隐私说明（离线可读，避免依赖网络加载） */
 const PRIVACY_SUMMARY = [
   '· 录音与声音识别（YAMNet）全部在你的手机上完成，音频不会上传到任何服务器。',
@@ -91,7 +97,6 @@ const MAX_RECORDING_AGE_MS = 3 * 24 * 60 * 60 * 1000; // 保留 3 天录音（WA
 const MAX_EVENTS_PER_SESSION = 1000; // 单次会话事件数上限，防止 AsyncStorage 溢出
 const MAX_PERSISTED_SESSIONS = 200; // 历史记录持久化条数上限
 const MIN_FREE_STORAGE_BYTES = 1500 * 1024 * 1024; // 开始监测前的剩余空间预警线（整晚 WAV 约 1GB）
-const MAX_CACHED_APKS = 3; // 最多保留几个更新包
 
 /** 设置页「检测阈值」分段切换的四类事件 */
 type ThresholdTab = 'snore' | 'grind' | 'talk' | 'apnea';
@@ -131,54 +136,6 @@ async function recordingExists(uri: string): Promise<boolean> {
     // 查询失败不等于文件不存在。返回 true 保留 URI，等真正播放失败时再提示，
     // 避免一次瞬时 I/O 异常把历史记录的录音关联永久清空。
     return true;
-  }
-}
-
-interface LatestRelease {
-  version: string;
-  downloadUrl: string;
-  body: string;
-  size?: number;
-}
-
-async function fetchLatestRelease(): Promise<LatestRelease | null> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 15000);
-  try {
-    const res = await fetch(GITHUB_RELEASE_API, {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        'User-Agent': `${GITHUB_REPO}/${CURRENT_VERSION}`,
-      },
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      if (res.status === 403) {
-        console.warn('GitHub API 频率受限，请稍后再试');
-      }
-      return null;
-    }
-    const data = await res.json();
-    const apkAsset = (data.assets || []).find(
-      (a: { name?: string; browser_download_url?: string }) => a.name?.endsWith('.apk')
-    );
-    if (!apkAsset?.browser_download_url) return null;
-    // 只接受本仓库 Releases 下发的地址，防止更新接口被投毒后引导用户下载第三方 APK
-    if (!apkAsset.browser_download_url.startsWith(EXPECTED_DOWNLOAD_PREFIX)) {
-      console.warn('更新包地址校验失败：非本仓库 Releases 资源', apkAsset.browser_download_url);
-      return null;
-    }
-    return {
-      version: data.tag_name || '',
-      downloadUrl: apkAsset.browser_download_url,
-      body: data.body || '',
-      size: typeof apkAsset.size === 'number' ? apkAsset.size : undefined,
-    };
-  } catch (e) {
-    console.warn('检查更新失败', e);
-    return null;
-  } finally {
-    clearTimeout(timeoutId);
   }
 }
 
@@ -295,10 +252,6 @@ function AppInner() {
   const startTimeRef = useRef<number>(0);
   const lastMeteringRef = useRef<number>(-100); // expo-av 回调方式的最新 metering 值
   const maxVolumeDbRef = useRef<number>(-100); // 本次监测最大音量
-  const downloadResumableRef = useRef<FileSystem.DownloadResumable | null>(null);
-  /** 下载任务代次：取消/重开后，旧任务的 catch 不能再清掉新任务的句柄和弹窗 */
-  const downloadTaskIdRef = useRef(0);
-  const downloadInFlightRef = useRef(false);
   /** 设置写入串行化：连续点阈值/开关时，避免并发读改写互相覆盖 */
   const settingsWriteRef = useRef<Promise<void>>(Promise.resolve());
   /**
@@ -397,7 +350,7 @@ function AppInner() {
       `当前版本：${CURRENT_VERSION}\n最新版本：${release.version}\n\n是否立即下载更新？`,
       [
         { text: '稍后再说', style: 'cancel' },
-        { text: '立即更新', onPress: () => downloadAndInstallApk(release.downloadUrl) },
+        { text: '立即更新', onPress: () => startApkInstall(release) },
       ]
     );
   };
@@ -428,19 +381,6 @@ function AppInner() {
     }
   };
 
-  const openUpdateUrl = async (url: string) => {
-    try {
-      const supported = await Linking.canOpenURL(url);
-      if (supported) {
-        await Linking.openURL(url);
-      } else {
-        Alert.alert('无法打开下载链接', url);
-      }
-    } catch (e) {
-      Alert.alert('打开链接失败', String(e));
-    }
-  };
-
   const openBatterySettings = async () => {
     if (Platform.OS !== 'android') return;
     try {
@@ -450,70 +390,35 @@ function AppInner() {
     }
   };
 
-  const cancelDownload = async () => {
-    // 先让旧任务代次失效，再取消；旧 downloadAsync 返回 undefined 时不会误弹失败。
-    downloadTaskIdRef.current += 1;
-    const task = downloadResumableRef.current;
-    downloadResumableRef.current = null;
-    downloadInFlightRef.current = false;
-    try {
-      if (task) await task.cancelAsync();
-    } catch (e) {
-      console.warn('取消下载失败', e);
-    }
+  /** 正在录制的兼容模式 m4a、历史记录仍引用的录音，不能被“清理缓存”删掉 */
+  const collectProtectedUris = (): string[] =>
+    [recordingUriRef.current, ...sessionsRef.current.map((s) => s.recordingUri)].filter(
+      (uri): uri is string => typeof uri === 'string' && uri.length > 0
+    );
+
+  /** 应用内更新的薄编排层：下载/校验/清理/安装都交给 updater 服务 */
+  const startApkInstall = async (release: LatestRelease) => {
+    await downloadAndInstallApk(
+      {
+        downloadUrl: release.downloadUrl,
+        expectedSize: release.size,
+        checksumUrl: release.checksumUrl,
+        protectedUris: collectProtectedUris(),
+        handlers: {
+          onDownloading: setIsDownloading,
+          onProgress: setDownloadProgress,
+          onStatus: setDownloadStatus,
+        },
+      },
+      cleanOldRecordings
+    );
+  };
+
+  const cancelDownload = () => {
+    cancelActiveDownload();
     setIsDownloading(false);
     setDownloadProgress(0);
     setDownloadStatus('已取消下载');
-  };
-
-  // 清理旧 APK 缓存，保留最近 MAX_CACHED_APKS 个，避免占用空间并确保覆盖安装干净。
-  const cleanUpdateCache = async (keepFileName?: string) => {
-    try {
-      if (!FileSystem.cacheDirectory) return;
-      const entries = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
-      const oldApks = entries
-        .filter((name) => name.startsWith('update_') && name.endsWith('.apk'))
-        .sort()
-        .reverse();
-      const toDelete = oldApks.filter((name) => name !== keepFileName).slice(MAX_CACHED_APKS);
-      await Promise.all(
-        toDelete.map((name) => FileSystem.deleteAsync(cachePath(name), { idempotent: true }).catch(() => {}))
-      );
-    } catch (e) {
-      console.warn('清理更新缓存失败', e);
-    }
-  };
-
-  // 清理应用自身缓存目录（不包括要安装的 APK），用于更新前释放空间、避免旧数据干扰。
-  const cleanAppCache = async (excludeApkName?: string) => {
-    try {
-      if (!FileSystem.cacheDirectory) return;
-      // 正在录制的兼容模式 m4a、历史记录仍引用的录音，都不能在“清理缓存”时删掉。
-      const protectedUris = new Set<string>();
-      const protect = (uri?: string) => {
-        if (uri) protectedUris.add(uri);
-      };
-      protect(recordingUriRef.current);
-      sessionsRef.current.forEach((s) => protect(s.recordingUri));
-      const entries = await FileSystem.readDirectoryAsync(FileSystem.cacheDirectory);
-      await Promise.all(
-        entries.map(async (name) => {
-          if (name === excludeApkName) return;
-          if (name.startsWith('update_') && name.endsWith('.apk')) return; // 由 cleanUpdateCache 管理
-          const itemUri = cachePath(name);
-          if (protectedUris.has(itemUri)) return;
-          try {
-            const info = await FileSystem.getInfoAsync(itemUri);
-            if (info.exists && info.isDirectory) return; // 不删除目录，避免误删关键数据
-            await FileSystem.deleteAsync(itemUri, { idempotent: true });
-          } catch {
-            // 忽略无法删除的项
-          }
-        })
-      );
-    } catch (e) {
-      console.warn('清理应用缓存失败', e);
-    }
   };
 
   // 清理超过保留期的录音文件，防止缓存无限增长。
@@ -558,158 +463,6 @@ function AppInner() {
         );
       } catch (e) {
         console.warn('清理旧录音失败', e);
-      }
-    }
-  };
-
-  const downloadAndInstallApk = async (url: string, interactive = true) => {
-    if (Platform.OS !== 'android') {
-      openUpdateUrl(url);
-      return;
-    }
-
-    if (downloadInFlightRef.current) {
-      if (interactive) Alert.alert('下载中', '已有更新任务在下载，请等待完成。');
-      return;
-    }
-    downloadInFlightRef.current = true;
-
-    // 覆盖安装前提示用户：新版会替换旧版并清理应用缓存。
-    if (interactive) {
-      const confirmed = await new Promise<boolean>((resolve) => {
-        Alert.alert(
-          '覆盖安装确认',
-          '下载完成后将使用新版 APK 覆盖安装旧版，并清理应用缓存（不会影响历史记录）。是否继续？',
-          [
-            { text: '取消', style: 'cancel', onPress: () => resolve(false) },
-            { text: '继续', onPress: () => resolve(true) },
-          ]
-        );
-      });
-      if (!confirmed) {
-        downloadInFlightRef.current = false;
-        return;
-      }
-    }
-
-    const taskId = ++downloadTaskIdRef.current;
-    setIsDownloading(true);
-    setDownloadProgress(0);
-    setDownloadStatus('准备下载…');
-    // 记录失败阶段：下载/校验失败与安装权限失败要给出不同提示
-    let stage: 'download' | 'verify' | 'install' = 'download';
-
-    try {
-      const fileName = `update_${Date.now()}.apk`;
-      const fileUri = cachePath(fileName);
-      const expectedSize = latestRelease?.size;
-
-      // 下载前清理旧的更新包和过期录音，减少存储占用。
-      await cleanUpdateCache(fileName);
-      await cleanOldRecordings();
-
-      setDownloadStatus(expectedSize ? `正在下载… 0% / ${formatBytes(expectedSize)}` : '正在下载…');
-      const resumable = FileSystem.createDownloadResumable(
-        url,
-        fileUri,
-        {},
-        (progress) => {
-          if (downloadTaskIdRef.current !== taskId) return;
-          const total = progress.totalBytesExpectedToWrite || expectedSize || 1;
-          const written = progress.totalBytesWritten || 0;
-          const pct = Math.min(1, Math.max(0, written / total));
-          setDownloadProgress(pct);
-          setDownloadStatus(
-            `正在下载… ${Math.round(pct * 100)}%${expectedSize ? ` / ${formatBytes(expectedSize)}` : ''}`
-          );
-        }
-      );
-      downloadResumableRef.current = resumable;
-
-      const result = await resumable.downloadAsync();
-      // 用户取消或已开始新任务：旧任务的结果/异常都不允许再动 UI。
-      if (downloadTaskIdRef.current !== taskId) return;
-      downloadResumableRef.current = null;
-      if (!result) {
-        throw new Error('下载失败，请检查网络');
-      }
-      stage = 'verify';
-
-      // 校验：APK 文件至少大于 1MB，且大小与 GitHub 声明一致（允许 ±1% 误差）
-      const fileInfo = await FileSystem.getInfoAsync(result.uri);
-      if (!fileInfo.exists || fileInfo.size < 1024 * 1024) {
-        throw new Error('下载文件异常，请重试');
-      }
-      if (expectedSize && expectedSize > 0 && fileInfo.size) {
-        const ratio = fileInfo.size / expectedSize;
-        if (ratio < 0.99 || ratio > 1.01) {
-          throw new Error(`文件大小校验失败，请重试（${formatBytes(fileInfo.size)} / ${formatBytes(expectedSize)}）`);
-        }
-      }
-
-      setDownloadStatus('下载完成，清理缓存并准备安装…');
-      setDownloadProgress(1);
-
-      // 安装前清理应用自身缓存（保留刚下载的 APK），释放空间并减少旧数据干扰。
-      await cleanAppCache(fileName);
-      await cleanUpdateCache(fileName);
-
-      // 获取 content:// URI 并启动安装界面
-      stage = 'install';
-      const contentUri = await FileSystem.getContentUriAsync(result.uri);
-      await IntentLauncher.startActivityAsync('android.intent.action.VIEW', {
-        data: contentUri,
-        type: 'application/vnd.android.package-archive',
-        flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
-      });
-
-      setIsDownloading(false);
-      downloadInFlightRef.current = false;
-    } catch (e) {
-      // 旧任务（已取消或已被新任务取代）的异常不能清掉新任务的状态。
-      if (downloadTaskIdRef.current !== taskId) return;
-      downloadResumableRef.current = null;
-      downloadInFlightRef.current = false;
-      setIsDownloading(false);
-      setDownloadProgress(0);
-      console.warn('下载或安装失败', e);
-      if (interactive) {
-        if (stage !== 'install') {
-          // 下载或校验阶段失败：与安装权限无关，展示真实原因
-          Alert.alert(
-            '更新失败',
-            `原因：${e instanceof Error ? e.message : String(e)}`,
-            [
-              { text: '取消', style: 'cancel' },
-              { text: '重试', onPress: () => downloadAndInstallApk(url, interactive) },
-            ]
-          );
-          return;
-        }
-        Alert.alert(
-          '安装权限未开启',
-          '系统需要“允许安装未知应用”权限才能自动安装更新。请前往设置开启后，再次点击“立即更新”。',
-          [
-            { text: '取消', style: 'cancel' },
-            { text: '重试', onPress: () => downloadAndInstallApk(url, interactive) },
-            {
-              text: '去开启',
-              onPress: async () => {
-                try {
-                  if (Platform.Version && Number(Platform.Version) >= 26) {
-                    await IntentLauncher.startActivityAsync('android.settings.MANAGE_UNKNOWN_APP_SOURCES', {
-                      data: 'package:com.snoresleep.monitor',
-                    });
-                  } else {
-                    Linking.openSettings();
-                  }
-                } catch {
-                  Linking.openSettings();
-                }
-              },
-            },
-          ]
-        );
       }
     }
   };
@@ -1414,7 +1167,15 @@ function AppInner() {
       if (!useNativeMeterRef.current) return;
       applyNativeResultRef.current(r);
     });
-    return () => sub.remove();
+    // 原生前台服务异常（startForeground 失败等）由 Kotlin 回传，标记本次录音已中断。
+    const errSub = DeviceEventEmitter.addListener('AudioMeterError', (message: string) => {
+      console.warn('原生录音服务异常', message);
+      audioStalledRef.current = true;
+    });
+    return () => {
+      sub.remove();
+      errSub.remove();
+    };
   }, []);
 
   const monitorLoop = async () => {
@@ -2222,38 +1983,42 @@ function AppInner() {
 
         {/* 四类统计：次数 + 累计时长，全部在主卡内显示，不再另开「高级信息」 */}
         <View style={styles.statsGrid}>
-          <View style={styles.statCard}>
-            <View style={[styles.statIconCircle, { backgroundColor: `${T.snore}18` }]}>
-              <Ionicons name="volume-high" size={16} color={T.snore} />
-            </View>
-            <Text style={styles.statValue}>{snoreCount}</Text>
-            <Text style={styles.statLabel}>打鼾</Text>
-            <Text style={styles.statDuration}>{formatDuration(snoreSeconds)}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <View style={[styles.statIconCircle, { backgroundColor: `${T.grind}18` }]}>
-              <Ionicons name="git-branch" size={16} color={T.grind} />
-            </View>
-            <Text style={styles.statValue}>{grindCount}</Text>
-            <Text style={styles.statLabel}>磨牙</Text>
-            <Text style={styles.statDuration}>{formatDuration(grindSeconds)}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <View style={[styles.statIconCircle, { backgroundColor: `${T.talk}18` }]}>
-              <Ionicons name="chatbubble" size={16} color={T.talk} />
-            </View>
-            <Text style={styles.statValue}>{talkCount}</Text>
-            <Text style={styles.statLabel}>梦话</Text>
-            <Text style={styles.statDuration}>{formatDuration(talkSeconds)}</Text>
-          </View>
-          <View style={styles.statCard}>
-            <View style={[styles.statIconCircle, { backgroundColor: `${T.apnea}18` }]}>
-              <Ionicons name="pulse" size={16} color={T.apnea} />
-            </View>
-            <Text style={styles.statValue}>{apneaCount}</Text>
-            <Text style={styles.statLabel}>呼吸暂停</Text>
-            <Text style={styles.statDuration}>{formatDuration(apneaSeconds)}</Text>
-          </View>
+          <StatCard
+            variant="home"
+            icon="volume-high"
+            color={T.snore}
+            value={snoreCount}
+            label="打鼾"
+            subText={formatDuration(snoreSeconds)}
+            styles={styles}
+          />
+          <StatCard
+            variant="home"
+            icon="git-branch"
+            color={T.grind}
+            value={grindCount}
+            label="磨牙"
+            subText={formatDuration(grindSeconds)}
+            styles={styles}
+          />
+          <StatCard
+            variant="home"
+            icon="chatbubble"
+            color={T.talk}
+            value={talkCount}
+            label="梦话"
+            subText={formatDuration(talkSeconds)}
+            styles={styles}
+          />
+          <StatCard
+            variant="home"
+            icon="pulse"
+            color={T.apnea}
+            value={apneaCount}
+            label="呼吸暂停"
+            subText={formatDuration(apneaSeconds)}
+            styles={styles}
+          />
         </View>
 
         {/* 实时音量区域 */}
@@ -2346,61 +2111,17 @@ function AppInner() {
           </View>
         }
         renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.historyItem}
+          <HistoryRow
+            session={item}
+            T={T}
+            styles={styles}
             onPress={() => {
               setSelectedSession(item);
               setPlaybackPosMs(0);
               setPlaybackDurMs(0);
               setScreen('detail');
             }}
-            activeOpacity={0.85}
-          >
-            <View style={styles.historyRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.historyTime}>{formatTime(item.startTime)}</Text>
-                <View style={styles.historyMetaRow}>
-                  <Ionicons name="time-outline" size={14} color={T.textTertiary} />
-                  <Text style={styles.historyMeta}>睡眠 {formatDuration(item.durationSeconds)}</Text>
-                </View>
-                {item.interrupted && (
-                  <View style={styles.historyMetaRow}>
-                    <Ionicons name="alert-circle-outline" size={14} color={T.warning} />
-                    <Text style={[styles.historyMeta, { color: T.warning }]}>
-                      录音中断，记录可能不完整
-                    </Text>
-                  </View>
-                )}
-                <View style={styles.historyCountRow}>
-                  <View style={[styles.historyCount, { backgroundColor: `${T.snore}15` }]}>
-                    <Ionicons name="volume-high-outline" size={14} color={T.snore} />
-                    <Text style={[styles.historyCountText, { color: T.snore }]}>{item.snoreCount}</Text>
-                  </View>
-                  <View style={[styles.historyCount, { backgroundColor: `${T.grind}15` }]}>
-                    <Ionicons name="git-branch-outline" size={14} color={T.grind} />
-                    <Text style={[styles.historyCountText, { color: T.grind }]}>{item.grindCount}</Text>
-                  </View>
-                  <View style={[styles.historyCount, { backgroundColor: `${T.talk}15` }]}>
-                    <Ionicons name="chatbubble-outline" size={14} color={T.talk} />
-                    <Text style={[styles.historyCountText, { color: T.talk }]}>{item.talkCount}</Text>
-                  </View>
-                  <View style={[styles.historyCount, { backgroundColor: `${T.apnea}15` }]}>
-                    <Ionicons name="pulse-outline" size={14} color={T.apnea} />
-                    <Text style={[styles.historyCountText, { color: T.apnea }]}>{item.apneaCount}</Text>
-                  </View>
-                </View>
-              </View>
-              <View style={{ alignItems: 'flex-end' }}>
-                <View style={[styles.qualityBadge, { backgroundColor: getQualityColor(item.qualityScore, T) }]}>
-                  <Text style={styles.qualityText}>{item.qualityScore}分</Text>
-                </View>
-                <View style={[styles.apneaRiskBadge, { backgroundColor: getApneaRiskColor(item.apneaRisk || 'low', T), marginTop: 6 }]}>
-                  <Text style={styles.apneaRiskText}>{getApneaRiskLabel(item.apneaRisk || 'low')}</Text>
-                </View>
-              </View>
-              <Ionicons name="chevron-forward" size={20} color={T.textTertiary} style={{ marginLeft: 8 }} />
-            </View>
-          </TouchableOpacity>
+          />
         )}
       />
     </View>
@@ -2455,51 +2176,21 @@ function AppInner() {
           )}
 
           <View style={styles.detailStatsGrid}>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="volume-high-outline" size={20} color={T.snore} />
-              <Text style={styles.detailStatValue}>{selectedSession.snoreCount}</Text>
-              <Text style={styles.detailStatLabel}>打鼾</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="git-branch-outline" size={20} color={T.grind} />
-              <Text style={styles.detailStatValue}>{selectedSession.grindCount}</Text>
-              <Text style={styles.detailStatLabel}>磨牙</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="chatbubble-outline" size={20} color={T.talk} />
-              <Text style={styles.detailStatValue}>{selectedSession.talkCount}</Text>
-              <Text style={styles.detailStatLabel}>梦话</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="pulse-outline" size={20} color={T.apnea} />
-              <Text style={styles.detailStatValue}>{selectedSession.apneaCount}</Text>
-              <Text style={styles.detailStatLabel}>呼吸暂停</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="volume-medium-outline" size={20} color={T.warning} />
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalSnoreSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>鼾声时长</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="git-branch-outline" size={20} color={T.grind} />
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalGrindSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>磨牙时长</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="chatbubble-outline" size={20} color={T.talk} />
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalTalkSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>梦话时长</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="pulse-outline" size={20} color={T.apnea} />
-              <Text style={styles.detailStatValue}>{formatDuration(selectedSession.totalApneaSeconds)}</Text>
-              <Text style={styles.detailStatLabel}>呼吸暂停时长</Text>
-            </View>
-            <View style={styles.detailStatCard}>
-              <Ionicons name="list-outline" size={20} color={T.textSecondary} />
-              <Text style={styles.detailStatValue}>{selectedSession.events.length}</Text>
-              <Text style={styles.detailStatLabel}>事件总数</Text>
-            </View>
+            {(
+              [
+                { icon: 'volume-high-outline', color: T.snore, value: selectedSession.snoreCount, label: '打鼾' },
+                { icon: 'git-branch-outline', color: T.grind, value: selectedSession.grindCount, label: '磨牙' },
+                { icon: 'chatbubble-outline', color: T.talk, value: selectedSession.talkCount, label: '梦话' },
+                { icon: 'pulse-outline', color: T.apnea, value: selectedSession.apneaCount, label: '呼吸暂停' },
+                { icon: 'volume-medium-outline', color: T.warning, value: formatDuration(selectedSession.totalSnoreSeconds), label: '鼾声时长' },
+                { icon: 'git-branch-outline', color: T.grind, value: formatDuration(selectedSession.totalGrindSeconds), label: '磨牙时长' },
+                { icon: 'chatbubble-outline', color: T.talk, value: formatDuration(selectedSession.totalTalkSeconds), label: '梦话时长' },
+                { icon: 'pulse-outline', color: T.apnea, value: formatDuration(selectedSession.totalApneaSeconds), label: '呼吸暂停时长' },
+                { icon: 'list-outline', color: T.textSecondary, value: selectedSession.events.length, label: '事件总数' },
+              ] as const
+            ).map((item) => (
+              <StatCard key={item.label} variant="detail" styles={styles} {...item} />
+            ))}
           </View>
 
           <View style={[styles.qualityBadgeLarge, { backgroundColor: getQualityColor(selectedSession.qualityScore, T), marginBottom: 10 }]}>
@@ -2761,37 +2452,16 @@ function AppInner() {
 
       <View style={styles.card}>
         <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${activeColor}20` }]}>
-              <Ionicons name="options-outline" size={20} color={activeColor} />
-            </View>
-            <Text style={styles.sectionTitle}>检测阈值</Text>
-          </View>
+          <SettingHeader icon="options-outline" color={activeColor} title="检测阈值" styles={styles} />
 
           {/* 四类阈值集成：分段切换，只渲染当前类别的说明与滑条 */}
-          <View style={styles.segmentRow}>
-            {THRESHOLD_TABS.map((tab) => {
-              const active = thresholdTab === tab.key;
-              return (
-                <TouchableOpacity
-                  key={tab.key}
-                  style={[styles.segmentItem, active && styles.segmentItemActive]}
-                  onPress={() => setThresholdTab(tab.key)}
-                  activeOpacity={0.8}
-                >
-                  <Text
-                    style={[
-                      styles.segmentText,
-                      active && styles.segmentTextActive,
-                      active && { color: activeColor },
-                    ]}
-                  >
-                    {tab.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          <SegmentControl
+            options={THRESHOLD_TABS}
+            value={thresholdTab}
+            onChange={setThresholdTab}
+            styles={styles}
+            activeColor={activeColor}
+          />
 
           <Text style={[styles.settingsDesc, { marginTop: 12 }]}>{activeTab.desc}</Text>
           <Text style={styles.thresholdValue}>{activeDisplay}</Text>
@@ -2842,12 +2512,7 @@ function AppInner() {
       {/* 通用设置：原先四张独立卡片合并为一张，分隔线分区，按钮紧凑化 */}
       <View style={[styles.card, { marginTop: 16 }]}>
         <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.primary}20` }]}>
-              <Ionicons name="cloud-download-outline" size={20} color={T.primary} />
-            </View>
-            <Text style={styles.sectionTitle}>应用更新</Text>
-          </View>
+          <SettingHeader icon="cloud-download-outline" color={T.primary} title="应用更新" styles={styles} />
           <View style={styles.versionRow}>
             <Text style={styles.settingsDesc}>当前版本 {CURRENT_VERSION}</Text>
             {updateCheckState === 'available' && latestRelease && (
@@ -2859,7 +2524,7 @@ function AppInner() {
           {updateCheckState === 'available' && latestRelease && (
             <TouchableOpacity
               style={[styles.actionButton, { backgroundColor: T.primary, marginBottom: 8 }]}
-              onPress={() => downloadAndInstallApk(latestRelease.downloadUrl)}
+              onPress={() => startApkInstall(latestRelease)}
             >
               <Ionicons name="download-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
               <Text style={styles.actionButtonText}>下载最新版本 APK</Text>
@@ -2883,51 +2548,34 @@ function AppInner() {
 
         <View style={styles.divider} />
 
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.primary}20` }]}>
-              <Ionicons name="color-palette-outline" size={20} color={T.primary} />
-            </View>
-            <Text style={styles.sectionTitle}>外观主题</Text>
-          </View>
-          <Text style={styles.settingsDesc}>夜间建议使用深色，设置立即生效并只保存在本机。</Text>
-          <View style={styles.segmentRow}>
-            {(
-              [
-                { key: 'system', label: '跟随系统' },
-                { key: 'light', label: '浅色' },
-                { key: 'dark', label: '深色' },
-              ] as Array<{ key: ThemePreference; label: string }>
-            ).map((opt) => {
-              const active = themePref === opt.key;
-              return (
-                <TouchableOpacity
-                  key={opt.key}
-                  style={[styles.segmentItem, active && styles.segmentItemActive]}
-                  onPress={() => applyThemePref(opt.key)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
+        <SettingSection
+          icon="color-palette-outline"
+          color={T.primary}
+          title="外观主题"
+          description="夜间建议使用深色，设置立即生效并只保存在本机。"
+          styles={styles}
+        >
+          <SegmentControl
+            options={[
+              { key: 'system', label: '跟随系统' },
+              { key: 'light', label: '浅色' },
+              { key: 'dark', label: '深色' },
+            ] as Array<{ key: ThemePreference; label: string }>}
+            value={themePref}
+            onChange={applyThemePref}
+            styles={styles}
+          />
+        </SettingSection>
 
         <View style={styles.divider} />
 
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.success}20` }]}>
-              <Ionicons name="lock-closed-outline" size={20} color={T.success} />
-            </View>
-            <Text style={styles.sectionTitle}>隐私与数据</Text>
-          </View>
-          <Text style={styles.settingsDesc}>
-            录音与识别全在本机完成，不上传数据；录音保留 3 天自动清理，历史记录仅存于本机。
-          </Text>
+        <SettingSection
+          icon="lock-closed-outline"
+          color={T.success}
+          title="隐私与数据"
+          description="录音与识别全在本机完成，不上传数据；录音保留 3 天自动清理，历史记录仅存于本机。"
+          styles={styles}
+        >
           <TouchableOpacity
             style={[styles.actionButton, { backgroundColor: T.primary }]}
             onPress={openPrivacyPolicy}
@@ -2935,20 +2583,17 @@ function AppInner() {
             <Ionicons name="document-text-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
             <Text style={styles.actionButtonText}>查看隐私政策</Text>
           </TouchableOpacity>
-        </View>
+        </SettingSection>
 
         <View style={styles.divider} />
 
-        <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.danger}20` }]}>
-              <Ionicons name="battery-charging-outline" size={20} color={T.danger} />
-            </View>
-            <Text style={styles.sectionTitle}>后台运行</Text>
-          </View>
-          <Text style={styles.settingsDesc}>
-            息屏后持续录音需允许后台运行，部分品牌（小米 / 华为 / OPPO / vivo）还需在省电策略中关闭限制。
-          </Text>
+        <SettingSection
+          icon="battery-charging-outline"
+          color={T.danger}
+          title="后台运行"
+          description="息屏后持续录音需允许后台运行，部分品牌（小米 / 华为 / OPPO / vivo）还需在省电策略中关闭限制。"
+          styles={styles}
+        >
           <TouchableOpacity
             style={[styles.actionButton, { backgroundColor: T.danger }]}
             onPress={openBatterySettings}
@@ -2956,53 +2601,30 @@ function AppInner() {
             <Ionicons name="shield-checkmark-outline" size={16} color={T.onAccent} style={{ marginRight: 6 }} />
             <Text style={styles.actionButtonText}>去设置后台权限</Text>
           </TouchableOpacity>
-        </View>
+        </SettingSection>
 
         <View style={styles.divider} />
 
         <View style={styles.settingSection}>
-          <View style={styles.settingHeader}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.warning}20` }]}>
-              <Ionicons name="trash-outline" size={20} color={T.warning} />
-            </View>
-            <Text style={styles.sectionTitle}>存储空间</Text>
-          </View>
+          <SettingHeader icon="trash-outline" color={T.warning} title="存储空间" styles={styles} />
           <Text style={styles.settingsDesc}>
             清理过期录音和缓存，释放空间（历史记录不会被删除）。
           </Text>
 
-          <View style={[styles.settingHeader, { marginTop: 4 }]}>
-            <View style={[styles.settingIconCircle, { backgroundColor: `${T.snore}20` }]}>
-              <Ionicons name="save-outline" size={20} color={T.snore} />
-            </View>
-            <Text style={styles.sectionTitle}>保存录音</Text>
-          </View>
+          <SettingHeader icon="save-outline" color={T.snore} title="保存录音" marginTop={4} styles={styles} />
           <Text style={styles.settingsDesc}>
             默认只保存「打呼噜的片段」：每段前后各留一点上下文，没打呼噜的部分直接丢掉，
             一晚上通常只有几十 MB。关闭后完全不写入音频，鼾声统计照常，但该晚无法回放。
           </Text>
-          <View style={styles.segmentRow}>
-            {(
-              [
-                { key: true, label: '保存' },
-                { key: false, label: '不保存' },
-              ] as Array<{ key: boolean; label: string }>
-            ).map((opt) => {
-              const active = saveRecording === opt.key;
-              return (
-                <TouchableOpacity
-                  key={opt.label}
-                  style={[styles.segmentItem, active && styles.segmentItemActive]}
-                  onPress={() => applySaveRecordingPref(opt.key)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          <SegmentControl
+            options={[
+              { key: true, label: '保存' },
+              { key: false, label: '不保存' },
+            ] as Array<{ key: boolean; label: string }>}
+            value={saveRecording}
+            onChange={applySaveRecordingPref}
+            styles={styles}
+          />
           {isMonitoring && (
             <Text style={styles.settingsDesc}>
               正在监测：切换「保存录音」会在下次监测生效，本次录音仍按开始时的设置保存。
@@ -3011,70 +2633,46 @@ function AppInner() {
 
           {saveRecording && (
             <>
-              <View style={[styles.settingHeader, { marginTop: 14 }]}>
-                <View style={[styles.settingIconCircle, { backgroundColor: `${T.textSecondary}20` }]}>
-                  <Ionicons name="albums-outline" size={20} color={T.textSecondary} />
-                </View>
-                <Text style={styles.sectionTitle}>保留整晚原始录音</Text>
-              </View>
+              <SettingHeader
+                icon="albums-outline"
+                color={T.textSecondary}
+                title="保留整晚原始录音"
+                marginTop={14}
+                styles={styles}
+              />
               <Text style={styles.settingsDesc}>
                 关掉（推荐）只保留有声音的片段（鼾声、梦话、磨牙）；打开会保留从头到尾的整晚 WAV
                 （约 1GB），连翻身、呼吸、安静的部分都在里面。
               </Text>
-              <View style={styles.segmentRow}>
-                {(
-                  [
-                    { key: false, label: '只留有声片段' },
-                    { key: true, label: '留整晚' },
-                  ] as Array<{ key: boolean; label: string }>
-                ).map((opt) => {
-                  const active = keepFullRecording === opt.key;
-                  return (
-                    <TouchableOpacity
-                      key={opt.label}
-                      style={[styles.segmentItem, active && styles.segmentItemActive]}
-                      onPress={() => applyKeepFullPref(opt.key)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                        {opt.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+              <SegmentControl
+                options={[
+                  { key: false, label: '只留有声片段' },
+                  { key: true, label: '留整晚' },
+                ] as Array<{ key: boolean; label: string }>}
+                value={keepFullRecording}
+                onChange={applyKeepFullPref}
+                styles={styles}
+              />
 
-              <View style={[styles.settingHeader, { marginTop: 14 }]}>
-                <View style={[styles.settingIconCircle, { backgroundColor: `${T.success}20` }]}>
-                  <Ionicons name="options-outline" size={20} color={T.success} />
-                </View>
-                <Text style={styles.sectionTitle}>录音降噪</Text>
-              </View>
+              <SettingHeader
+                icon="options-outline"
+                color={T.success}
+                title="录音降噪"
+                marginTop={14}
+                styles={styles}
+              />
               <Text style={styles.settingsDesc}>
                 开启后保存的片段会做 80Hz 高通滤波，压掉风扇、空调的低频隆隆声（20Hz 约降 24dB、50Hz 约降 9dB）；识别仍用原始麦克风数据，不会因为降噪漏记轻声鼾。
               </Text>
-              <View style={styles.segmentRow}>
-                {(
-                  [
-                    { key: true, label: '开' },
-                    { key: false, label: '关' },
-                  ] as Array<{ key: boolean; label: string }>
-                ).map((opt) => {
-                  const active = denoiseRecording === opt.key;
-                  return (
-                    <TouchableOpacity
-                      key={opt.label}
-                      style={[styles.segmentItem, active && styles.segmentItemActive]}
-                      onPress={() => applyDenoisePref(opt.key)}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-                        {opt.label}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                })}
-              </View>
+              <SegmentControl
+                options={[
+                  { key: true, label: '开' },
+                  { key: false, label: '关' },
+                ] as Array<{ key: boolean; label: string }>}
+                value={denoiseRecording}
+                onChange={applyDenoisePref}
+                styles={styles}
+              />
             </>
           )}
 
@@ -3083,7 +2681,7 @@ function AppInner() {
             onPress={async () => {
               try {
                 await cleanOldRecordings();
-                await cleanAppCache();
+                await cleanAppCache(undefined, collectProtectedUris());
                 Alert.alert('清理完成', '已清理过期录音和应用缓存。');
               } catch (e) {
                 Alert.alert('清理失败', String(e));

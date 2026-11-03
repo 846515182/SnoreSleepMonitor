@@ -104,7 +104,7 @@ export const darkTheme: Theme = {
 
   text: '#E9EFF5',
   textSecondary: '#A2B3C4',
-  textTertiary: '#7286 9A'.replace(' ', ''),
+  textTertiary: '#72869A',
   background: '#0E1621',
   card: '#17212E',
   border: '#26323F',
