@@ -55,6 +55,8 @@ export function getEventColor(type: SoundEventType, T: Theme): string {
       return T.talk;
     case 'apnea':
       return T.dangerStrong;
+    case 'turn':
+      return T.turn;
     default:
       return T.noise;
   }
@@ -71,6 +73,8 @@ export function getEventTextColor(type: SoundEventType, T: Theme): string {
       return T.talkText;
     case 'apnea':
       return T.apneaText;
+    case 'turn':
+      return T.turnText;
     default:
       return T.textSecondary;
   }
@@ -89,7 +93,9 @@ export function getEventLabel(
           ? '梦话'
           : type === 'apnea'
             ? '呼吸暂停'
-            : '未知';
+            : type === 'turn'
+              ? '翻身'
+              : '未知';
   if (type === 'snore' && intensity) {
     return `${base}(${getIntensityLabel(intensity)})`;
   }

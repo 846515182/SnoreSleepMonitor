@@ -9,6 +9,8 @@ import {
   MAX_GRIND_MS,
   MIN_SNORE_MS,
   MIN_TALK_MS,
+  MIN_TURN_MS,
+  MAX_TURN_MS,
 } from '../events';
 import type { EpisodeStats } from '../events';
 
@@ -90,14 +92,20 @@ test('打鼾时长不足 -> 丢弃', () => {
   assert.equal(evt, null);
 });
 
-test('梦话：占比 >= 0.6 且至少 1.5 秒（单帧 0.975 秒的误判不再记）', () => {
-  const evt = classifyFinalEvent(2000, { snore: 0, grind: 0, talk: 8, total: 10 }, 0, snoreShape);
-  assert.equal(evt?.type, 'talk');
-
-  // 单帧 = 0.975 秒：环境人声/咳嗽，不够 1.5 秒
-  assert.equal(classifyFinalEvent(975, { snore: 0, grind: 0, talk: 2, total: 2 }, 0, snoreShape), null);
-  // 时长够了但占比只有 0.5
-  assert.equal(classifyFinalEvent(2000, { snore: 0, grind: 0, talk: 5, total: 10 }, 0, snoreShape), null);
+test('梦话：至少 2 帧、占比 >= 0.5（不再要求 1.5 秒）', () => {
+  // 2 帧相邻 = 975ms：真实梦话常常只有一两句，现在要能记到
+  assert.equal(
+    classifyFinalEvent(975, { snore: 0, grind: 0, talk: 2, total: 2 }, 0, snoreShape)?.type,
+    'talk'
+  );
+  assert.equal(
+    classifyFinalEvent(2000, { snore: 0, grind: 0, talk: 8, total: 10 }, 0, snoreShape)?.type,
+    'talk'
+  );
+  // 单帧（时长 0）：环境人声、咳嗽只响一帧，仍然不记
+  assert.equal(classifyFinalEvent(0, { snore: 0, grind: 0, talk: 1, total: 1 }, 0, snoreShape), null);
+  // 帧数够但占比只有 0.4
+  assert.equal(classifyFinalEvent(3000, { snore: 0, grind: 0, talk: 4, total: 10 }, 0, snoreShape), null);
 });
 
 test('梦话时长不足 -> 丢弃', () => {
@@ -105,15 +113,53 @@ test('梦话时长不足 -> 丢弃', () => {
   assert.equal(evt, null);
 });
 
-test('磨牙：占比 >= 0.3 且时长在 0.3–1.5s 之间', () => {
-  const ok = classifyFinalEvent(800, { snore: 2, grind: 3, talk: 0, total: 10 }, 0, snoreShape);
-  assert.equal(ok?.type, 'grind');
+test('磨牙：2 帧起记，3/5/10 帧不再被 1.5 秒上限丢掉', () => {
+  const shape = (frames: number) =>
+    classifyFinalEvent(
+      (frames - 1) * 975,
+      { snore: 0, grind: frames, talk: 0, turn: 0, total: frames },
+      0,
+      snoreShape
+    )?.type;
 
-  const tooShort = classifyFinalEvent(MIN_GRIND_MS - 1, { snore: 0, grind: 5, talk: 0, total: 10 }, 0, snoreShape);
-  assert.equal(tooShort, null);
+  assert.equal(shape(2), 'grind', '2 帧（975ms）是现实里最短的一次磨牙，要记到');
+  assert.equal(shape(3), 'grind', '3 帧（1950ms）以前会被 1500ms 上限丢掉，现在必须记到');
+  assert.equal(shape(5), 'grind');
+  assert.equal(shape(10), 'grind', '连磨 10 秒是真实磨牙，必须记到');
 
-  const tooLong = classifyFinalEvent(MAX_GRIND_MS + 1, { snore: 0, grind: 5, talk: 0, total: 10 }, 0, snoreShape);
-  assert.equal(tooLong, null);
+  // 单帧摩擦不记
+  assert.equal(classifyFinalEvent(0, { snore: 0, grind: 1, talk: 0, turn: 0, total: 1 }, 0, snoreShape), null);
+  // 占比不足（和鼾声混在一起）
+  assert.equal(classifyFinalEvent(6000, { snore: 0, grind: 3, talk: 0, turn: 0, total: 10 }, 0, snoreShape), null);
+  // 超过单条上限（更像是持续摩擦）
+  assert.equal(
+    classifyFinalEvent(MAX_GRIND_MS + 1, { snore: 0, grind: 50, talk: 0, turn: 0, total: 50 }, 0, snoreShape),
+    null
+  );
+  assert.ok(MIN_GRIND_MS >= 0);
+});
+
+test('翻身：2 帧起记、占比 >= 0.5，且单声闷响 / 持续摩擦都不记', () => {
+  assert.equal(
+    classifyFinalEvent(4000, { snore: 0, grind: 0, talk: 0, turn: 3, total: 4 }, 0, snoreShape)?.type,
+    'turn'
+  );
+  // 单帧闷响（门响、东西落地）时长 0，不记
+  assert.equal(
+    classifyFinalEvent(0, { snore: 0, grind: 0, talk: 0, turn: 1, total: 1 }, 0, snoreShape),
+    null
+  );
+  // 帧数够但占比 0.4：更像是鼾声里夹了点摩擦
+  assert.equal(
+    classifyFinalEvent(4000, { snore: 0, grind: 0, talk: 0, turn: 2, total: 5 }, 0, snoreShape),
+    null
+  );
+  // 超过 2 分钟的"摩擦"（空调摆风、床垫共振）不记
+  assert.equal(
+    classifyFinalEvent(MAX_TURN_MS + 1, { snore: 0, grind: 0, talk: 0, turn: 30, total: 30 }, 0, snoreShape),
+    null
+  );
+  assert.ok(MIN_TURN_MS >= 0);
 });
 
 test('所有类型都不满足 -> null（避免把环境噪声记为事件）', () => {

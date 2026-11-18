@@ -94,12 +94,15 @@ export interface Theme {
   grind: string;
   talk: string;
   apnea: string;
+  /** 翻身/床体噪声：中性偏冷的蓝，和"异常声音"的暖色区分开 */
+  turn: string;
   noise: string;
   /** 事件语义色作为文字时的前景色 */
   snoreText: string;
   grindText: string;
   talkText: string;
   apneaText: string;
+  turnText: string;
 
   /** 比语义色更深一档，用于文字/徽标底色上的前景 */
   qualityMid: string;
@@ -150,11 +153,13 @@ export const lightTheme: Theme = {
   grind: '#FFD93D',
   talk: '#9B59B6',
   apnea: '#FF6B6B',
+  turn: '#4A8FD6',
   noise: '#7A8B9C',
   snoreText: '#0B7C74',
   grindText: '#8A5B00',
   talkText: '#6633A6',
   apneaText: '#B3241F',
+  turnText: '#1B5490',
 
   qualityMid: '#E8B930',
   dangerStrong: '#D93B2B',
@@ -198,11 +203,13 @@ export const darkTheme: Theme = {
   grind: '#FFD93D',
   talk: '#B07BD1',
   apnea: '#FF8A80',
+  turn: '#6AAEE8',
   noise: '#A9B7C6',
   snoreText: '#6FE7DF',
   grindText: '#FFD93D',
   talkText: '#CB9FF0',
   apneaText: '#FF9A8F',
+  turnText: '#9BCBF2',
 
   qualityMid: '#FFCB4D',
   dangerStrong: '#FF7A66',

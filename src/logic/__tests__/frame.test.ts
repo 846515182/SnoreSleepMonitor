@@ -7,6 +7,7 @@ import {
   DEFAULT_SNORE_CONFIDENCE,
   DEFAULT_TALK_CONFIDENCE,
   SNORE_MIN_DB,
+  TURN_MIN_DB,
 } from '../frame';
 import type { Thresholds } from '../frame';
 
@@ -109,7 +110,7 @@ test('异常呼吸音只用于收口暂停，不单独计事件', () => {
   assert.equal(flags.loud, false, '喘息本身不该被记成鼾声/梦话事件');
 });
 
-test('风扇、翻身、安静呼吸都不产生事件', () => {
+test('风扇、安静呼吸不产生事件；翻身只归到翻身，不会被记成鼾声/梦话', () => {
   for (const f of [
     quiet,
     { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 },
@@ -120,5 +121,37 @@ test('风扇、翻身、安静呼吸都不产生事件', () => {
     assert.equal(flags.snore, false);
     assert.equal(flags.grind, false);
     assert.equal(flags.talk, false);
+    assert.equal(flags.turn, false);
   }
+
+  // 翻身：床架吱呀 + 被褥摩擦，top 类别为 turn
+  const turn = classifyFrame(
+    { topClass: 'turn', confidences: { turn: 0.55, noise: 0.3 }, amplitudeDb: -42 },
+    TH
+  );
+  assert.equal(turn.turn, true);
+  assert.equal(turn.snore, false, '翻身不能被记成打鼾');
+  assert.equal(turn.talk, false);
+  assert.equal(turn.grind, false);
+  assert.equal(turn.loud, true, '翻身要参与事件合并与静音锚定');
+
+  // 置信度不够：房间里一点轻微摩擦
+  assert.equal(
+    classifyFrame({ topClass: 'turn', confidences: { turn: 0.3, noise: 0.6 }, amplitudeDb: -42 }, TH).turn,
+    false
+  );
+  // 音量太轻：远处环境里的塑料摩擦声，不能算翻身
+  assert.equal(
+    classifyFrame(
+      { topClass: 'turn', confidences: { turn: 0.8, noise: 0.1 }, amplitudeDb: TURN_MIN_DB - 5 },
+      TH
+    ).turn,
+    false
+  );
+  // top 类别不是 turn：别的类别帧里夹带摩擦分，不能抢走事件
+  assert.equal(
+    classifyFrame({ topClass: 'snoring', confidences: { snoring: 0.7, turn: 0.5 }, amplitudeDb: -40 }, TH)
+      .turn,
+    false
+  );
 });

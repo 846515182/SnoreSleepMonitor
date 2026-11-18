@@ -54,7 +54,7 @@ test('启动失败回到 idle，并清空本次聚合，允许重试', () => {
   const starting = monitorReducer(initialMonitorState, { type: 'start/begin' });
   const failed = monitorReducer(starting, { type: 'start/failed' });
   assert.equal(failed.phase, 'idle');
-  assert.deepEqual(failed.counts, { snore: 0, grind: 0, talk: 0, apnea: 0 });
+  assert.deepEqual(failed.counts, { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 });
   assert.deepEqual(failed.events, []);
 });
 
@@ -80,7 +80,7 @@ test('停止结算只执行一次：finish 后回到 idle，重复 finish 无副
   const idle = monitorReducer(stopping, { type: 'stop/finish' });
   assert.equal(idle.phase, 'idle');
   assert.deepEqual(idle.events, []);
-  assert.deepEqual(idle.counts, { snore: 0, grind: 0, talk: 0, apnea: 0 });
+  assert.deepEqual(idle.counts, { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 });
   assert.equal(monitorReducer(idle, { type: 'stop/finish' }), idle);
 });
 
@@ -108,10 +108,16 @@ test('事件累加：计数与时长只加一次，类型分别记账', () => {
     { type: 'frame/event', event: event('snore', 5000) },
     { type: 'frame/event', event: event('apnea', 10000, 6000) },
   ]);
-  assert.deepEqual(once.counts, { snore: 1, grind: 0, talk: 0, apnea: 1 });
+  assert.deepEqual(once.counts, { snore: 1, grind: 0, talk: 0, apnea: 1, turn: 0 });
   assert.equal(once.events.length, 2);
   assert.equal(once.totalsMs.snore, 5000);
   assert.equal(once.totalsMs.apnea, 10000);
+
+  // 新增的翻身类型也必须走同一条聚合路径（计数 + 时长各记一次）
+  const withTurn = monitorReducer(once, { type: 'frame/event', event: event('turn', 4000, 20000) });
+  assert.equal(withTurn.counts.turn, 1);
+  assert.equal(withTurn.totalsMs.turn, 4000);
+  assert.equal(withTurn.counts.snore, 1, '新增类型不能把已有计数改乱');
 });
 
 test('事件累加：idle 丢弃，stopping 接受 flush 收尾的最后一条', () => {
@@ -134,7 +140,7 @@ test('事件上限：达到 MAX_EVENTS_PER_SESSION 后只置截断标记，不�
   const full: MonitorState = {
     ...monitoring,
     events: Array.from({ length: MAX_EVENTS_PER_SESSION }, (_, i) => event('snore', 1000, i)),
-    counts: { snore: MAX_EVENTS_PER_SESSION, grind: 0, talk: 0, apnea: 0 },
+    counts: { snore: MAX_EVENTS_PER_SESSION, grind: 0, talk: 0, apnea: 0, turn: 0 },
   };
   const overflow = monitorReducer(full, { type: 'frame/event', event: event('snore', 1000) });
   assert.equal(overflow.events.length, MAX_EVENTS_PER_SESSION);
@@ -178,10 +184,12 @@ test('会话列表由 reducer 单点持有：sessions/set 覆盖旧值', () => {
     grindCount: 0,
     talkCount: 0,
     apneaCount: 0,
+    turnCount: 0,
     totalSnoreSeconds: 0,
     totalGrindSeconds: 0,
     totalTalkSeconds: 0,
     totalApneaSeconds: 0,
+    totalTurnSeconds: 0,
     qualityScore: 100,
     apneaRisk: 'low' as const,
     intensityBreakdown: { mild: 0, moderate: 0, severe: 0 },

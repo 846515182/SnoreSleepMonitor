@@ -9,6 +9,7 @@ import {
   clipWindow,
   nextClipIndex,
   planEventAudio,
+  MAX_EVENT_AUDIO_MS,
   selectSnoreClips,
 } from '../clips';
 import type { SoundEvent } from '../../types';
@@ -176,4 +177,30 @@ test('clipWindow：已有 playStart 时按裁剪文件里的位置算，不再�
   assert.equal(w.start, 300);
   assert.equal(w.end, 4_300);
   assert.equal(clipStartMs(evt), 300);
+});
+test('鼾声吃满预算后，梦话/磨牙/翻身仍然保留音频', () => {
+  // 整晚 2 小时鼾声 + 3 条稀有声事件：如果按时间先后分配 45 分钟预算，
+  // 鼾声会把预算吃光，后面的梦话/翻身都变成"有记录、没音频"。
+  const events: SoundEvent[] = [
+    { start: 1_000, end: 60 * 60 * 1000, duration: 3599_000, type: 'snore' },
+    { start: 62 * 60 * 1000, end: 64 * 60 * 1000, duration: 120_000, type: 'snore' },
+    { start: 65 * 60 * 1000, end: 65 * 60 * 1000 + 30_000, duration: 30_000, type: 'grind' },
+    { start: 5 * 60 * 60 * 1000, end: 5 * 60 * 60 * 1000 + 4_000, duration: 4_000, type: 'talk' },
+    { start: 6 * 60 * 60 * 1000, end: 6 * 60 * 60 * 1000 + 6_000, duration: 6_000, type: 'turn' },
+  ];
+
+  const plan = planEventAudio(events);
+
+  for (const i of [2, 3, 4]) {
+    assert.ok(
+      plan.offsets[i] >= 0,
+      `${events[i].type} 事件必须有音频（鼾声不能把预算独占）`
+    );
+  }
+  assert.ok(plan.totalMs <= MAX_EVENT_AUDIO_MS, '总时长不能超过上限');
+  // 区间必须升序且互不重叠，原生是按顺序切片的
+  for (let k = 1; k < plan.ranges.length; k += 1) {
+    assert.ok(plan.ranges[k].start >= plan.ranges[k - 1].end, '裁剪区间重叠了');
+  }
+  assert.ok(plan.ranges.length >= 3, '稀有声事件应各自成段');
 });

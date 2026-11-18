@@ -102,8 +102,20 @@ export const MAX_EVENT_AUDIO_MS = 45 * 60 * 1000;
 /** 两段声音离得比这还近就并成一段，免得片段之间夹一堆静音 */
 export const CLIP_MERGE_GAP_MS = 400;
 
-/** 默认裁进来的事件类型：鼾声、梦话、磨牙。呼吸暂停本身是无声段，没有音频可留 */
-export const AUDIO_EVENT_TYPES: readonly SoundEventType[] = ['snore', 'talk', 'grind'];
+/**
+ * 默认裁进来的事件类型：鼾声、梦话、磨牙，以及翻身/床体噪声。
+ * 呼吸暂停本身是无声段，没有音频可留。
+ *
+ * 翻身也要留音频：用户想确认的往往正是"这一声到底是翻身还是别的东西"，
+ * 只给次数不给声音，等于没法自查。
+ */
+export const AUDIO_EVENT_TYPES: readonly SoundEventType[] = ['snore', 'talk', 'grind', 'turn'];
+
+/**
+ * 稀有声事件：整晚通常只有几十秒。预算分配时优先保障，
+ * 否则鼾声一个人就能吃掉整份 45 分钟预算，梦话/翻身只剩有记录、没音频。
+ */
+export const RARE_AUDIO_TYPES: readonly SoundEventType[] = ['talk', 'grind', 'turn'];
 
 export interface SnoreAudioPlan {
   /** 要从原录音里拷出来的区间（毫秒，升序、互不重叠） */
@@ -135,37 +147,58 @@ export function planEventAudio(
   events.forEach((e, i) => {
     if (types.includes(e.type)) picked.push(i);
   });
-  picked.sort((a, b) => events[a].start - events[b].start);
+  // 稀有声事件（梦话 / 磨牙 / 翻身）排前面：整晚通常只有几十秒，
+  // 如果和鼾声一起按时间顺序抢 45 分钟预算，往往还没轮到最后一段就满了，
+  // 结果是"报告里显示了梦话，但点播放没有音频"。鼾声用剩下的预算。
+  const rare = picked.filter((i) => RARE_AUDIO_TYPES.includes(events[i].type));
+  const common = picked.filter((i) => !RARE_AUDIO_TYPES.includes(events[i].type));
 
-  const ranges: { start: number; end: number }[] = [];
-  let cur: { start: number; end: number } | null = null;
-  let total = 0;
+  const buildRanges = (indices: number[], budgetMs: number) => {
+    const out: { start: number; end: number }[] = [];
+    let cur: { start: number; end: number } | null = null;
+    let used = 0;
 
-  const pushCur = () => {
-    if (!cur) return;
-    let len = cur.end - cur.start;
-    if (total + len > maxTotalMs) len = Math.max(0, maxTotalMs - total);
-    if (len > 0) {
-      ranges.push({ start: cur.start, end: cur.start + len });
-      total += len;
+    const pushCur = () => {
+      if (!cur) return;
+      let len = cur.end - cur.start;
+      if (used + len > budgetMs) len = Math.max(0, budgetMs - used);
+      if (len > 0) {
+        out.push({ start: cur.start, end: cur.start + len });
+        used += len;
+      }
+      cur = null;
+    };
+
+    for (const i of indices.slice().sort((a, b) => events[a].start - events[b].start)) {
+      if (used >= budgetMs) break;
+      const ev = events[i];
+      const s = Math.max(0, Math.round(ev.start - CLIP_PAD_BEFORE_MS));
+      const e = Math.max(s + 1, Math.round(ev.end + CLIP_PAD_AFTER_MS));
+      if (cur && s <= cur.end + CLIP_MERGE_GAP_MS) {
+        cur.end = Math.max(cur.end, e);
+      } else {
+        pushCur();
+        if (used >= budgetMs) break;
+        cur = { start: s, end: e };
+      }
     }
-    cur = null;
+    pushCur();
+    return { ranges: out, total: used };
   };
 
-  for (const i of picked) {
-    if (total >= maxTotalMs) break;
-    const ev = events[i];
-    const s = Math.max(0, Math.round(ev.start - CLIP_PAD_BEFORE_MS));
-    const e = Math.max(s + 1, Math.round(ev.end + CLIP_PAD_AFTER_MS));
-    if (cur && s <= cur.end + CLIP_MERGE_GAP_MS) {
-      cur.end = Math.max(cur.end, e);
-    } else {
-      pushCur();
-      if (total >= maxTotalMs) break;
-      cur = { start: s, end: e };
-    }
+  const rarePlan = buildRanges(rare, maxTotalMs);
+  const commonPlan = buildRanges(common, maxTotalMs - rarePlan.total);
+
+  // 两批区间可能重叠（例如鼾声段里夹着一句梦话）：按时间排序后合并，
+  // 保证交给原生的 ranges 是升序且互不重叠的。
+  const merged: { start: number; end: number }[] = [];
+  for (const r of [...rarePlan.ranges, ...commonPlan.ranges].sort((a, b) => a.start - b.start)) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+    else merged.push({ ...r });
   }
-  pushCur();
+  const ranges = merged;
+  const total = ranges.reduce((sum, r) => sum + (r.end - r.start), 0);
 
   const offsets: number[] = new Array(events.length).fill(-1);
   let base = 0;

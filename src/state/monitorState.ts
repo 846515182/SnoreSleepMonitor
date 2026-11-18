@@ -18,6 +18,7 @@ export interface MonitorCounts {
   grind: number;
   talk: number;
   apnea: number;
+  turn: number;
 }
 
 export interface MonitorTotalsMs {
@@ -25,6 +26,7 @@ export interface MonitorTotalsMs {
   grind: number;
   talk: number;
   apnea: number;
+  turn: number;
 }
 
 export interface MonitorState {
@@ -57,14 +59,14 @@ export const initialMonitorState: MonitorState = {
   phase: 'idle',
   sessions: [],
   events: [],
-  counts: { snore: 0, grind: 0, talk: 0, apnea: 0 },
-  totalsMs: { snore: 0, grind: 0, talk: 0, apnea: 0 },
+  counts: { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 },
+  totalsMs: { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 },
   ongoingMs: 0,
   eventsTruncated: false,
 };
 
-const EMPTY_COUNTS: MonitorCounts = { snore: 0, grind: 0, talk: 0, apnea: 0 };
-const EMPTY_TOTALS: MonitorTotalsMs = { snore: 0, grind: 0, talk: 0, apnea: 0 };
+const EMPTY_COUNTS: MonitorCounts = { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 };
+const EMPTY_TOTALS: MonitorTotalsMs = { snore: 0, grind: 0, talk: 0, apnea: 0, turn: 0 };
 
 const isCollecting = (phase: MonitorPhase) => phase === 'starting' || phase === 'monitoring';
 

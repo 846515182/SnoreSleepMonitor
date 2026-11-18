@@ -2,7 +2,14 @@
  * 领域类型定义（原 App.tsx 内联定义，抽出以供 UI / 逻辑 / 测试共用）。
  */
 
-export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea';
+/**
+ * 事件类型：
+ * - snore / grind / talk：声音事件（计入睡眠质量评分）
+ * - apnea：疑似呼吸暂停（无声段）
+ * - turn：翻身 / 床体噪声（床垫、床架、被褥摩擦与身体落床的闷响）
+ *   属于正常睡眠行为，只做记录与回放，不计入质量评分
+ */
+export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
 export interface SoundEvent {
@@ -37,10 +44,13 @@ export interface SleepSession {
   grindCount: number;
   talkCount: number;
   apneaCount: number;
+  /** 翻身 / 床体噪声次数（正常生理行为，不计入质量评分） */
+  turnCount: number;
   totalSnoreSeconds: number;
   totalGrindSeconds: number;
   totalTalkSeconds: number;
   totalApneaSeconds: number;
+  totalTurnSeconds: number;
   recordingUri?: string;
   /** snore = 音频已裁成只剩鼾声片段；full = 整晚原始录音 */
   recordingMode?: 'snore' | 'full';

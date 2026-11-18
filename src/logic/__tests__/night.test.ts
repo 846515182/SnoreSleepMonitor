@@ -47,7 +47,12 @@ type Scene =
   | 'continuousSnore'
   | 'lowConfSnore'
   | 'fakeSnore'
-  | 'snoreLoose';
+  | 'snoreLoose'
+  | 'turn'
+  | 'turnThump'
+  | 'bedCreak'
+  | 'talkShort'
+  | 'grindLong';
 
 /**
  * 单帧内容。
@@ -104,6 +109,29 @@ function frameAt(scene: Scene, i: number): FrameInput {
       return i % 6 < 2
         ? { topClass: 'snoring', confidences: { snoring: 0.72, noise: 0.1 }, amplitudeDb: -34 }
         : { topClass: 'noise', confidences: { noise: 0.7 }, amplitudeDb: -58 };
+    case 'turn':
+      // 翻身：床架吱呀 + 被褥摩擦。响 2 帧、轻 1 帧，一次动作约 3 秒
+      return i % 3 < 2
+        ? { topClass: 'turn', confidences: { turn: 0.6, noise: 0.25 }, amplitudeDb: -42 }
+        : { topClass: 'noise', confidences: { noise: 0.6, turn: 0.2 }, amplitudeDb: -57 };
+    case 'turnThump':
+      // 只响一声的闷响：门响、东西落地、只翻了一半 —— 单帧，不该成事件
+      return { topClass: 'turn', confidences: { turn: 0.72, noise: 0.2 }, amplitudeDb: -38 };
+    case 'bedCreak':
+      // 床架轻微吱呀：-58dB，比翻身音量门槛（-55dB）还轻，属于远处环境摩擦
+      return { topClass: 'turn', confidences: { turn: 0.55, noise: 0.3 }, amplitudeDb: -58 };
+    case 'talkShort':
+      // 梦话只嘟囔一句：2 帧带声音，第 3 帧就停了
+      return i < 2
+        ? { topClass: 'talking', confidences: { talking: 0.66, noise: 0.2 }, amplitudeDb: -44 }
+        : { topClass: 'noise', confidences: { noise: 0.6 }, amplitudeDb: -58 };
+    case 'grindLong':
+      // 持续磨牙：每一帧都在磨，带轻微起伏（真实磨牙一磨就是十几秒）
+      return {
+        topClass: 'grinding',
+        confidences: { grinding: 0.62, snoring: 0.1 },
+        amplitudeDb: i % 2 === 0 ? -44 : -48,
+      };
     case 'fan':
       return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 };
     case 'quiet':
@@ -362,4 +390,103 @@ test('假装打呼噜时每次换气停 4 秒：不会被拆成碎片', () => {
   const snores = events.filter((e) => e.type === 'snore');
   assert.equal(snores.length, 1, '4 秒换气停顿要跨过去，不能拆成好几条');
   assert.ok((snores[0]?.duration ?? 0) >= 10_000);
+});
+test('真人一夜：打鼾 / 梦话 / 磨牙 / 翻身 / 暂停全部记到，单声闷响与轻床响不误报', () => {
+  const frames = buildNight([
+    ['quiet', 50],
+    ['turn', 6], // 23:12 翻身
+    ['quiet', 40],
+    ['snore', 60], // 打鼾
+    ['apneaSilence', 20], // 暂停 20 秒
+    ['snore', 30], // 鼾声收口
+    ['quiet', 60],
+    ['talkShort', 4], // 02:05 梦话一句（旧逻辑要 1.5 秒才记，这句是 0.975 秒）
+    ['quiet', 40],
+    ['grindLong', 8], // 04:20 磨牙 8 帧（旧逻辑被 1.5 秒上限整段丢掉）
+    ['quiet', 50],
+    ['turnThump', 1], // 一声闷响：不该记
+    ['quiet', 50],
+    ['bedCreak', 6], // 床架轻响 -58dB：不该记
+    ['quiet', 40],
+    ['turn', 6], // 05:40 再翻身
+    ['quiet', 40],
+  ]);
+
+  const { events, apneas, endTime } = runNight(frames);
+  const byType = (type: SoundEvent['type']) => events.filter((e) => e.type === type);
+
+  assert.equal(byType('snore').length, 2, '两段打鼾');
+  assert.equal(byType('turn').length, 2, '两次翻身都要记到');
+  assert.equal(byType('talk').length, 1, '短梦话也要记到');
+  assert.equal(byType('grind').length, 1, '8 帧的持续磨牙要记到一条，而不是丢掉');
+  assert.equal(apneas.length, 1);
+
+  // 单声闷响、轻床响不能变成事件
+  assert.equal(events.filter((e) => e.type === 'turn').length, 2, '仅两次真实翻身');
+
+  const summary = summarizeSession({ startTime: 0, endTime, events });
+  assert.equal(summary.turnCount, 2);
+  assert.equal(summary.talkCount, 1);
+  assert.equal(summary.grindCount, 1);
+  assert.equal(summary.snoreCount, 2);
+  assert.ok(summary.totalTurnSeconds >= 6, `翻身总时长应有 6 秒以上，实际 ${summary.totalTurnSeconds}`);
+
+  // 翻身属于正常行为：把它剔掉，质量分必须一分不变
+  const withoutTurn = summarizeSession({
+    startTime: 0,
+    endTime,
+    events: events.filter((e) => e.type !== 'turn'),
+  });
+  assert.equal(withoutTurn.qualityScore, summary.qualityScore, '翻身不能影响睡眠质量评分');
+
+  // 翻身也要有音频可回放（用户要能自己确认"这一声是什么"）
+  const plan = planEventAudio(events);
+  const turnEvents = byType('turn');
+  assert.equal(plan.ranges.length >= 1, true);
+  for (const ev of turnEvents) {
+    const idx = events.indexOf(ev);
+    assert.ok(plan.offsets[idx] >= 0, '翻身事件应能对到音频片段');
+  }
+});
+
+test('整晚只有翻身：不会冒出鼾声/梦话/暂停', () => {
+  const { events, apneas } = runNight(
+    buildNight([
+      ['quiet', 60],
+      ['turn', 8],
+      ['quiet', 120],
+      ['turn', 8],
+      ['quiet', 60],
+    ])
+  );
+  assert.equal(events.filter((e) => e.type !== 'turn').length, 0, '翻身不能被判成别的类型');
+  assert.equal(events.filter((e) => e.type === 'turn').length, 2);
+  assert.equal(apneas.length, 0);
+});
+
+test('梦话停顿 7 秒后再翻身：各自成条，不互相吞并', () => {
+  const { events } = runNight(
+    buildNight([
+      ['talk', 6],
+      ['quiet', 7],
+      ['turn', 4],
+      ['quiet', 20],
+    ])
+  );
+  const types = events.map((e) => e.type);
+  assert.deepEqual(types.sort(), ['talk', 'turn'], `梦话与翻身应各一条，实际 ${types}`);
+});
+
+test('梦话与翻身同时发生（边说边动）：并成一条，按占比归到主类别', () => {
+  // 现实里"嘟囔着翻身"就是一整段连续的声音，硬拆成两条反而更糟；
+    // 这里钉死的是"归到占比更大的那一类"，而不是两边各记一半。
+  const { events } = runNight(
+    buildNight([
+      ['talk', 6],
+      ['turn', 4],
+      ['quiet', 20],
+    ])
+  );
+  assert.equal(events.length, 1, `连续声音只应是一条事件，实际 ${events.map((e) => e.type)}`);
+  assert.equal(events[0]?.type, 'talk', '梦话帧更多，应归到梦话');
 });

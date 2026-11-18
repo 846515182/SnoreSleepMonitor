@@ -13,7 +13,7 @@
  * 这两条能把绝大部分稳态噪声挡掉，又不会误伤真人（真人不可能一直用完全相同的音量打鼾）。
  */
 
-export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea';
+export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
 /** 一段「打鼾」至少持续 5 秒：再短就分不清是咳嗽/翻身还是真的一口鼾 */
@@ -36,10 +36,35 @@ export const STEADY_SNORE_MS = 45_000;
 export const STEADY_SNORE_CONF = 0.75;
 export const STEADY_SNORE_RATIO = 0.75;
 
-export const MIN_GRIND_MS = 300; // 最小磨牙持续时间 0.3 秒
-export const MAX_GRIND_MS = 1500; // 磨牙事件一般不超过 1.5 秒
-export const MIN_TALK_MS = 1500; // 最小梦话持续时间 1.5 秒：单帧 0.975 秒的“梦话”几乎都是环境人声、咳嗽、电视
-export const MIN_TALK_RATIO = 0.6; // 梦话帧占比门槛
+export const MIN_GRIND_MS = 900; // 磨牙最小持续：至少 2 帧（0.975s 一帧，两帧相邻即 975ms）
+/**
+ * 单条磨牙记录的上限。
+ *
+ * 原实现写的是 1500ms（"磨牙一般不超过 1.5 秒"），但帧粒度就是 0.975 秒：
+ * 3 帧 = 1950ms 就超上限被整段丢弃，等于只认"刚好 2 帧"的碎片，真实磨牙
+ * （持续几秒到几十秒）反而记不到。现在放宽到 2 分钟，靠帧数与占比来约束。
+ */
+export const MAX_GRIND_MS = 120_000;
+/** 磨牙至少 2 帧：单帧 0.975 秒的分不清是磨牙还是翻身摩擦 */
+export const MIN_GRIND_FRAMES = 2;
+/** 磨牙帧在「有声帧」里的占比 */
+export const MIN_GRIND_RATIO = 0.5;
+
+export const MIN_TALK_MS = 900; // 至少 2 帧：真实梦话常常只有一两句，2 帧 = 975ms
+export const MIN_TALK_FRAMES = 2;
+export const MIN_TALK_RATIO = 0.5; // 梦话帧占比门槛
+
+/**
+ * 翻身 / 床体噪声（床架吱呀、被褥摩擦、身体落床的闷响）。
+ *
+ * 只做「记录 + 回放」，不计入睡眠质量评分：正常人整晚翻身 20–40 次，
+ * 把它算成"噪音"会让评分永远是低分，反而失真。
+ */
+export const MIN_TURN_MS = 900; // 至少 2 帧
+export const MIN_TURN_FRAMES = 2;
+export const MIN_TURN_RATIO = 0.5;
+/** 单条翻身记录上限：超过 2 分钟更像是持续摩擦（空调摆风/床垫共振）而非一次翻身 */
+export const MAX_TURN_MS = 120_000;
 /**
  * 静音宽限期：小于此值的静音不结束事件。
  *
@@ -56,6 +81,11 @@ export interface FrameCounts {
   snore: number;
   grind: number;
   talk: number;
+  /**
+   * 翻身/床体噪声帧。
+   * 可选：老快照/外部调用方不带这个字段时按 0 处理，不必强制改造所有调用点。
+   */
+  turn?: number;
   total: number;
 }
 
@@ -108,6 +138,8 @@ export function classifyFinalEvent(
   const snoreRatio = total > 0 ? counts.snore / total : 0;
   const grindRatio = total > 0 ? counts.grind / total : 0;
   const talkRatio = total > 0 ? counts.talk / total : 0;
+  const turnFrames = counts.turn ?? 0;
+  const turnRatio = total > 0 ? turnFrames / total : 0;
 
   const enoughSnore =
     counts.snore >= MIN_SNORE_FRAMES &&
@@ -128,11 +160,37 @@ export function classifyFinalEvent(
   if (hasBreathStructure || steadyButConfident) {
     return { type: 'snore', intensity: classifyIntensity(maxSnoreConf) };
   }
-  if (talkRatio >= MIN_TALK_RATIO && durationMs >= MIN_TALK_MS) {
+
+  // 梦话：语音类声音。梦话往往只有一两句（2 帧 ≈ 1 秒），所以门槛按帧数与占比定，
+  // 而不是按一个够不到的固定秒数（以前的 1.5 秒 == 至少要 3 帧，短梦话全被丢掉）。
+  if (
+    counts.talk >= MIN_TALK_FRAMES &&
+    talkRatio >= MIN_TALK_RATIO &&
+    durationMs >= MIN_TALK_MS
+  ) {
     return { type: 'talk' };
   }
-  if (grindRatio >= 0.3 && durationMs >= MIN_GRIND_MS && durationMs <= MAX_GRIND_MS) {
+
+  // 磨牙：时长只做"至少 2 帧、单条不超过 2 分钟"的形态约束，不再用 1.5 秒硬上限。
+  if (
+    counts.grind >= MIN_GRIND_FRAMES &&
+    grindRatio >= MIN_GRIND_RATIO &&
+    durationMs >= MIN_GRIND_MS &&
+    durationMs <= MAX_GRIND_MS
+  ) {
     return { type: 'grind' };
   }
+
+  // 翻身/床体噪声放在最后：只有当这一段声音既不像打鼾、也不像梦话/磨牙时才归到这里，
+  // 这样翻身永远不会把真正的事件"抢走"，只会补上以前被整体丢弃的那一类声音。
+  if (
+    turnFrames >= MIN_TURN_FRAMES &&
+    turnRatio >= MIN_TURN_RATIO &&
+    durationMs >= MIN_TURN_MS &&
+    durationMs <= MAX_TURN_MS
+  ) {
+    return { type: 'turn' };
+  }
+
   return null;
 }

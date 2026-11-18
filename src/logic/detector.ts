@@ -34,6 +34,7 @@ interface Draft {
   snoreFrames: number;
   grindFrames: number;
   talkFrames: number;
+  turnFrames: number;
   totalFrames: number;
   maxSnoreConf: number;
   /** 事件期间每一帧的音量（含换气停顿），用于算包络起伏 */
@@ -47,6 +48,8 @@ export interface DetectorFrame {
   snore: boolean;
   grind: boolean;
   talk: boolean;
+  /** 翻身/床体噪声帧（可选：旧调用方不传时按 false 处理） */
+  turn?: boolean;
 }
 
 export class SoundEventDetector {
@@ -87,7 +90,7 @@ export class SoundEventDetector {
     const t = Math.max(elapsedMs, this.lastFrameMs);
     this.lastFrameMs = t;
 
-    const loud = frame.snore || frame.grind || frame.talk;
+    const loud = frame.snore || frame.grind || frame.talk || frame.turn === true;
     let finalized: SoundEvent | null = null;
 
     if (loud) {
@@ -103,6 +106,7 @@ export class SoundEventDetector {
           snoreFrames: 0,
           grindFrames: 0,
           talkFrames: 0,
+          turnFrames: 0,
           totalFrames: 0,
           maxSnoreConf: 0,
           dbs: [],
@@ -124,6 +128,7 @@ export class SoundEventDetector {
       }
       if (frame.grind) d.grindFrames += 1;
       if (frame.talk) d.talkFrames += 1;
+      if (frame.turn) d.turnFrames += 1;
     } else if (this.draft) {
       // 换气/静音帧也是一个「响—停」回合的结束
       this.draft.lastWasSnore = false;
@@ -154,6 +159,7 @@ export class SoundEventDetector {
         snore: d.snoreFrames,
         grind: d.grindFrames,
         talk: d.talkFrames,
+        turn: d.turnFrames,
         total: d.totalFrames,
       },
       d.maxSnoreConf,

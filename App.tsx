@@ -35,6 +35,7 @@ import {
   DEFAULT_SNORE_CONFIDENCE,
   DEFAULT_GRIND_CONFIDENCE,
   DEFAULT_TALK_CONFIDENCE,
+  DEFAULT_TURN_CONFIDENCE,
 } from './src/logic/frame';
 import { SoundEventDetector } from './src/logic/detector';
 import { compareVersion } from './src/logic/version';
@@ -120,8 +121,8 @@ type ThresholdTab = 'snore' | 'grind' | 'talk' | 'apnea';
  */
 const THRESHOLD_TABS: Array<{ key: ThresholdTab; label: string; desc: string }> = [
   { key: 'snore', label: '打鼾', desc: '“打鼾”置信度达到该阈值且持续达标才记录一次，推荐 40%–60%。' },
-  { key: 'grind', label: '磨牙', desc: '“磨牙”置信度达到该阈值且事件持续 0.3–1.5 秒才记录，推荐 30%–45%。' },
-  { key: 'talk', label: '梦话', desc: '语音类声音置信度达到该阈值且达到最小时长才记录，推荐 45%–60%。' },
+  { key: 'grind', label: '磨牙', desc: '“磨牙”置信度达到该阈值、连续 2 帧以上才记录（不再限制 1.5 秒），推荐 30%–45%。' },
+  { key: 'talk', label: '梦话', desc: '语音类声音置信度达到该阈值、持续 1 秒以上才记录；翻身属于另一类事件，不受此阈值影响。' },
   {
     key: 'apnea',
     label: '暂停',
@@ -203,14 +204,18 @@ function AppInner() {
   const grindCount = monitorState.counts.grind;
   const talkCount = monitorState.counts.talk;
   const apneaCount = monitorState.counts.apnea;
+  const turnCount = monitorState.counts.turn;
   const snoreSeconds = Math.floor(monitorState.totalsMs.snore / 1000);
   const grindSeconds = Math.floor(monitorState.totalsMs.grind / 1000);
   const talkSeconds = Math.floor(monitorState.totalsMs.talk / 1000);
   const apneaSeconds = Math.floor(monitorState.totalsMs.apnea / 1000);
+  const turnSeconds = Math.floor(monitorState.totalsMs.turn / 1000);
+  // 「有声音的总时长」把翻身也算进来：它确实是房间里的声音，只是不进质量评分
   const totalNoiseSeconds = Math.floor(
     (monitorState.totalsMs.snore +
       monitorState.totalsMs.grind +
       monitorState.totalsMs.talk +
+      monitorState.totalsMs.turn +
       monitorState.ongoingMs) /
       1000
   );
@@ -506,10 +511,12 @@ function AppInner() {
           grindCount: s.grindCount ?? 0,
           talkCount: s.talkCount ?? 0,
           apneaCount: s.apneaCount ?? 0,
+          turnCount: s.turnCount ?? 0,
           totalSnoreSeconds: s.totalSnoreSeconds ?? 0,
           totalGrindSeconds: s.totalGrindSeconds ?? 0,
           totalTalkSeconds: s.totalTalkSeconds ?? 0,
           totalApneaSeconds: s.totalApneaSeconds ?? 0,
+          totalTurnSeconds: s.totalTurnSeconds ?? 0,
           qualityScore: s.qualityScore ?? 100,
           apneaRisk: s.apneaRisk ?? 'low',
           intensityBreakdown: s.intensityBreakdown ?? { mild: 0, moderate: 0, severe: 0 },
@@ -1123,7 +1130,12 @@ function AppInner() {
       // 阈值取本次渲染的 state：轮询路径经 applyNativeResultRef 调用，闭包始终是最新一次渲染的。
       const flags = classifyFrame(
         { topClass: tClass, confidences: confs, amplitudeDb: metering },
-        { snore: snoreThreshold, grind: grindThreshold, talk: talkThreshold }
+        {
+          snore: snoreThreshold,
+          grind: grindThreshold,
+          talk: talkThreshold,
+          turn: DEFAULT_TURN_CONFIDENCE,
+        }
       );
 
       setIsSnoringNow(flags.loud);
@@ -1945,7 +1957,7 @@ function AppInner() {
         )}
       </View>
 
-      {/* 今晚统计：四个等宽格子，格间用 1px 分隔线，不再各画一张嵌套卡 */}
+      {/* 今晚统计：五类事件分两排三格，末排留空保持上下等宽 */}
       <View style={styles.card}>
         <View style={styles.statsGrid}>
           <StatCard
@@ -1977,6 +1989,18 @@ function AppInner() {
             subText={formatDuration(talkSeconds)}
             styles={styles}
           />
+        </View>
+        <View style={styles.statRowDivider} />
+        <View style={styles.statsGrid}>
+          <StatCard
+            variant="home"
+            icon="swap-horizontal"
+            color={T.turnText}
+            value={turnCount}
+            label="翻身"
+            subText={formatDuration(turnSeconds)}
+            styles={styles}
+          />
           <View style={styles.statDivider} />
           <StatCard
             variant="home"
@@ -1987,6 +2011,7 @@ function AppInner() {
             subText={formatDuration(apneaSeconds)}
             styles={styles}
           />
+          <View style={styles.statSpacer} />
         </View>
       </View>
 
@@ -2085,14 +2110,13 @@ function AppInner() {
             />
           )}
 
-          {/* 计数格：四类事件次数，同一行等宽，彼此用 1px 分隔线 */}
+          {/* 计数格：五类事件，两排三格，上下等宽 */}
           <View style={styles.detailStatsGrid}>
             {(
               [
                 { icon: 'volume-high-outline', color: T.snoreText, value: selectedSession.snoreCount, label: '打鼾' },
                 { icon: 'git-branch-outline', color: T.grindText, value: selectedSession.grindCount, label: '磨牙' },
                 { icon: 'chatbubble-outline', color: T.talkText, value: selectedSession.talkCount, label: '梦话' },
-                { icon: 'pulse-outline', color: T.apneaText, value: selectedSession.apneaCount, label: '呼吸暂停' },
               ] as const
             ).map((item, idx) => (
               <React.Fragment key={item.label}>
@@ -2100,6 +2124,27 @@ function AppInner() {
                 <StatCard variant="detail" styles={styles} {...item} />
               </React.Fragment>
             ))}
+          </View>
+          <View style={styles.statRowDivider} />
+          <View style={styles.detailStatsGrid}>
+            <StatCard
+              variant="detail"
+              styles={styles}
+              icon="swap-horizontal-outline"
+              color={T.turnText}
+              value={selectedSession.turnCount ?? 0}
+              label="翻身"
+            />
+            <View style={styles.statDivider} />
+            <StatCard
+              variant="detail"
+              styles={styles}
+              icon="pulse-outline"
+              color={T.apneaText}
+              value={selectedSession.apneaCount}
+              label="呼吸暂停"
+            />
+            <View style={styles.statSpacer} />
           </View>
 
           <View style={styles.badgePair}>
@@ -2117,8 +2162,13 @@ function AppInner() {
             <MetricRow icon="git-branch-outline" color={T.grindText} label="磨牙时长" value={formatDuration(selectedSession.totalGrindSeconds)} styles={styles} />
             <MetricRow icon="chatbubble-outline" color={T.talkText} label="梦话时长" value={formatDuration(selectedSession.totalTalkSeconds)} styles={styles} />
             <MetricRow icon="pulse-outline" color={T.apneaText} label="呼吸暂停时长" value={formatDuration(selectedSession.totalApneaSeconds)} styles={styles} />
+            <MetricRow icon="swap-horizontal-outline" color={T.turnText} label="翻身时长" value={formatDuration(selectedSession.totalTurnSeconds ?? 0)} styles={styles} />
             <MetricRow icon="list-outline" color={T.textSecondary} label="事件总数" value={selectedSession.events.length} divider={false} styles={styles} />
           </View>
+
+          <Text style={styles.disclaimerText}>
+            翻身属于正常睡眠行为，只做记录与回放，不计入睡眠质量评分。
+          </Text>
 
           <Text style={styles.disclaimerText}>
             呼吸暂停筛查基于连续无声时长估算，仅供参考，不构成医疗诊断；如有疑虑请就医进行专业睡眠监测（多导睡眠图）。
@@ -2257,7 +2307,8 @@ function AppInner() {
                 const iconName =
                   evt.type === 'snore' ? 'volume-high-outline' :
                   evt.type === 'grind' ? 'git-branch-outline' :
-                  evt.type === 'talk' ? 'chatbubble-outline' : 'pulse-outline';
+                  evt.type === 'talk' ? 'chatbubble-outline' :
+                  evt.type === 'turn' ? 'swap-horizontal-outline' : 'pulse-outline';
                 return (
                   <TouchableOpacity
                     key={idx}

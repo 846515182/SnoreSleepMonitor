@@ -257,6 +257,16 @@ export const makeStyles = (T: Theme) =>
       backgroundColor: T.border,
       marginVertical: spacing.xs,
     },
+    /** 两排统计格之间的 1px 分隔线 */
+    statRowDivider: {
+      height: 1,
+      backgroundColor: T.border,
+      marginVertical: spacing.sm,
+    },
+    /** 统计格末排的占位：让上下两排的格子宽度完全对齐 */
+    statSpacer: {
+      flex: 1,
+    },
     statCard: {
       flex: 1,
       alignItems: 'center',
