@@ -44,7 +44,7 @@ import kotlin.math.*`,
   `        // Speech, Child speech, Conversation, Narration, Whispering, Babbling.`,
   `        // 梦话常常是含混的嘟囔，YAMNet 更多给出 Babbling / Whispering 而不是干净的 Speech。`,
   `        val TALKING_INDICES = listOf(0, 1, 2, 3, 12, 4)`,
-  `        // 磨牙：咀嚼、咬合、高频摩擦（Scratch / Rub / Scratching）。只保留"摩擦类"代理，
+  `        // 磨牙：咀嚼、咬合、高频摩擦（Scratch / Rub / Scratching）——只留摩擦类代理。`,
   `        // Squeak / Creak 属于床架声，已挪到翻身类别，避免一次翻身被记成磨牙。`,
   `        val GRINDING_INDICES = listOf(49, 50, 210, 468, 470)`,
   `        // 翻身 / 床体噪声：被褥摩擦(Rustle / Rustling leaves)、身体落床的闷响(Thump, thud)、`,
