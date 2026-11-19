@@ -18,7 +18,14 @@ import {
   useColorScheme,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import {
+  Audio,
+  InterruptionModeAndroid,
+  InterruptionModeIOS,
+  type Recording,
+  type RecordingOptions,
+  type Sound,
+} from './src/services/audioCompat';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
@@ -249,11 +256,11 @@ function AppInner() {
     sendMonitor({ type: 'sessions/set', sessions: next });
   };
 
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const recordingRef = useRef<Recording | null>(null);
   const recordingUriRef = useRef<string>('');
   const recordingModeRef = useRef<'snore' | 'full' | undefined>(undefined);
   const useNativeMeterRef = useRef<boolean>(false);
-  const soundRef = useRef<Audio.Sound | null>(null);
+  const soundRef = useRef<Sound | null>(null);
   /** soundRef 里当前加载的是哪一条录音；切会话后不能拿旧音频直接 seek */
   const loadedRecordingUriRef = useRef<string>('');
   /** 每次播放/停止递增：异步 createAsync 完成后发现已过期，必须卸载自己，不能污染新播放 */
@@ -987,7 +994,7 @@ function AppInner() {
         // 费电且晃眼，所以只在降级时使用；正常（原生）路径绝不这样。
         await activateKeepAwakeAsync('monitor').catch(() => {});
         // expo-av 回退方案：用 onRecordingStatusUpdate 回调获取 metering（比 getStatusAsync 更可靠）
-        const recordingOptions: Audio.RecordingOptions = {
+        const recordingOptions: RecordingOptions = {
           isMeteringEnabled: true,
           android: {
             extension: '.m4a',
@@ -1416,7 +1423,7 @@ function AppInner() {
     const generation = ++playbackGenerationRef.current;
     const isCurrent = () =>
       playbackGenerationRef.current === generation && screenRef.current === 'detail';
-    let loaded: Audio.Sound | null = null;
+    let loaded: Sound | null = null;
     try {
       // 录音存放在应用私有目录，可能已被保留期清理或用户删除。播放前先校验文件存在性，
       // 避免直接交给 ExoPlayer 抛出 FileNotFoundException。
