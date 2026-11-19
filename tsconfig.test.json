@@ -6,10 +6,19 @@
     "module": "node16",
     "moduleResolution": "node16",
     "target": "es2020",
-    "lib": ["es2020"],
-    "types": ["node"],
+    "lib": [
+      "es2020"
+    ],
+    "types": [
+      "node"
+    ],
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "rootDir": "./src"
   },
-  "include": ["src/logic/**/*.ts", "src/state/**/*.ts", "src/types.ts"]
+  "include": [
+    "src/logic/**/*.ts",
+    "src/state/**/*.ts",
+    "src/types.ts"
+  ]
 }
