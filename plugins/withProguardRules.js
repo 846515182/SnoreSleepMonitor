@@ -14,11 +14,11 @@ const { createRunOncePlugin, withDangerousMod } = require('expo/config-plugins')
 const fs = require('fs');
 const path = require('path');
 
-const MARKER = '// snore-sleep: expo-av SDK58 兼容';
+const MARKER = '# snore-sleep: expo-av SDK58 兼容';
 
 const RULES = [
   MARKER,
-  '# expo-av 16 的视频播放器引用了 SDK 58 已移除的 KeepAwakeManager。',
+  '# expo-av 16 的视频播放器引用了 SDK 58 已移除的 KeepAwakeManager，',
   '# 本项目只用音频接口，该引用不可达，允许 R8 忽略缺失类。',
   '-dontwarn expo.modules.core.interfaces.services.KeepAwakeManager',
   '-dontwarn expo.modules.core.interfaces.services.**',
