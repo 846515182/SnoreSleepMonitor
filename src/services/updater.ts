@@ -3,7 +3,7 @@
 // 必须校验 SHA-256，不匹配一律拒绝安装；无法校验时必须由用户显式确认，不允许静默跳过。
 
 import { Alert, Linking, NativeModules, Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as IntentLauncher from 'expo-intent-launcher';
 import Constants from 'expo-constants';
 
