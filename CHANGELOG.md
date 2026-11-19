@@ -3,7 +3,7 @@
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 风格，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## 未发布
+## v1.7.0 - 2026-11-19
 
 ### ✨ 事件识别
 
@@ -21,6 +21,13 @@
 
 - 裁剪预算改为「稀有声事件优先」：梦话 / 磨牙 / 翻身先占预算，鼾声用剩下的部分。
   否则整晚鼾声会把 45 分钟预算吃光，梦话和翻身只剩"有记录、没音频"。
+
+### 🚀 平台升级
+
+- Expo SDK 51 → **58**、React Native 0.74 → **0.88**、React 18 → **19**（合并 dependabot #12 #13）。
+- 原生层适配：RN 0.88 不再内置 CLI，补 `@react-native-community/cli` 与 `@react-native/metro-config`；
+  文件系统读取改用 `expo-file-system` 新 API（旧接口走 `/legacy` 入口）。
+- CI 的 setup-java 升至 v5、setup-android 升至 v4、react-native-web 升至 0.21。
 
 ### ✅ 测试
 
