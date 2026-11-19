@@ -50,7 +50,8 @@
         }
       ],
       "./plugins/withAudioMeter.js",
-      "./plugins/withReleaseSigning.js"
+      "./plugins/withReleaseSigning.js",
+      "./plugins/withProguardRules.js"
     ]
   }
 }
