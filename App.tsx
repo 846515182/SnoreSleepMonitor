@@ -97,14 +97,26 @@ const AudioMeter = NativeModules.AudioMeter;
 // 常量
 /** 版本号由 app.config.js 从 package.json 注入，消除三处硬编码漂移 */
 const CURRENT_VERSION = (Constants.expoConfig?.version as string) || '0.0.0';
-const PRIVACY_POLICY_URL = 'https://github.com/846515182/SnoreSleepMonitor/blob/main/PRIVACY.md';
+/**
+ * 应用商店版本（STORE_BUILD=1）：
+ * 国内商店明确禁止应用内下载/安装 APK，因此商店版不检查更新、不申请安装权限；
+ * 官网 GitHub 版仍保留原有的更新能力。
+ */
+const IS_STORE_BUILD = Constants.expoConfig?.extra?.storeBuild === true;
+const PRIVACY_POLICY_URL =
+  (Constants.expoConfig?.extra?.privacyPolicyUrl as string) ||
+  'https://github.com/846515182/SnoreSleepMonitor/blob/main/PRIVACY.md';
 /** 首次启动同意页与设置页共用的隐私说明（离线可读，避免依赖网络加载） */
 const PRIVACY_SUMMARY = [
   '· 录音与声音识别（YAMNet）全部在你的手机上完成，音频不会上传到任何服务器。',
   '· 应用不收集个人身份信息，不接入广告或统计 SDK。',
   '· 录音文件保存在本机应用私有存储中，3 天后自动清理；你也可以在历史记录里删除单条录音。',
   '· 历史睡眠记录仅保存在本机，卸载应用即随之删除。',
-  '· 同意隐私说明后，应用启动时或你主动点击「检查更新」时会访问本仓库的 GitHub Releases；不会上传任何录音或历史记录。',
+  ...(IS_STORE_BUILD
+    ? ['· 本版本不访问网络，也不会下载或安装任何外部应用。']
+    : [
+        '· 同意隐私说明后，应用启动时或你主动点击「检查更新」时会访问本仓库的 GitHub Releases；不会上传任何录音或历史记录。',
+      ]),
   '',
   '呼吸暂停筛查结果仅供参考，不构成医疗诊断。',
 ].join('\n');
@@ -384,8 +396,9 @@ function AppInner() {
             '历史记录读取失败',
             '为避免覆盖旧记录，本次不会写入历史存储。请重启应用后再试；本次监测仍会保留中断快照。'
           );
-        } else if (accepted) {
-          // 未同意隐私说明前不访问 GitHub；同意后才自动检查更新
+        } else if (accepted && !IS_STORE_BUILD) {
+          // 未同意隐私说明前不访问 GitHub；同意后才自动检查更新。
+          // 商店版本完全不联网（商店禁止应用内下载/安装 APK）。
           checkUpdate(false);
         }
       }
@@ -407,6 +420,8 @@ function AppInner() {
   };
 
   const checkUpdate = async (interactive = false) => {
+    // 商店版没有安装权限，检查更新只会误导用户，直接忽略
+    if (IS_STORE_BUILD) return;
     if (interactive) setUpdateCheckState('checking');
     const release = await fetchLatestRelease();
     if (!release) {
@@ -1936,7 +1951,7 @@ function AppInner() {
           <Text style={styles.title}>睡眠监测</Text>
           <Text style={styles.subtitle}>v{CURRENT_VERSION} · 守护整晚安睡</Text>
         </View>
-        {updateCheckState === 'available' && latestRelease && (
+        {!IS_STORE_BUILD && updateCheckState === 'available' && latestRelease && (
           <TouchableOpacity
             style={styles.updateBadge}
             onPress={() => promptUpdate(latestRelease)}
@@ -2602,6 +2617,8 @@ function AppInner() {
 
       {/* 通用设置：原先四张独立卡片合并为一张，分隔线分区，按钮紧凑化 */}
       <View style={styles.card}>
+        {!IS_STORE_BUILD && (
+        <>
         <View style={styles.settingSection}>
           <SettingHeader icon="cloud-download-outline" color={T.primaryText} title="应用更新" styles={styles} />
           <View style={styles.versionRow}>
@@ -2638,6 +2655,8 @@ function AppInner() {
         </View>
 
         <View style={styles.divider} />
+        </>
+        )}
 
         <SettingSection
           icon="color-palette-outline"

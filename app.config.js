@@ -12,6 +12,23 @@
 const pkg = require('./package.json');
 const base = require('./app.json').expo;
 
+/**
+ * 商店构建开关：STORE_BUILD=1 时生成小米等国内应用商店版本。
+ * 国内商店禁止应用内下载/安装 APK，因此必须去掉安装权限；
+ * 官网 GitHub 版不受影响（不设置该环境变量即可）。
+ */
+const storeBuild = process.env.STORE_BUILD === '1';
+const basePermissions = base.android?.permissions || [];
+const storePermissions = basePermissions.filter(
+  (permission) => permission !== 'android.permission.REQUEST_INSTALL_PACKAGES'
+);
+const storeBlockedPermissions = Array.from(
+  new Set([
+    ...(base.android?.blockedPermissions || []),
+    'android.permission.REQUEST_INSTALL_PACKAGES',
+  ])
+);
+
 /** 语义版本 -> versionCode：major*10000 + minor*100 + patch（上限 2147483647） */
 function versionToCode(version) {
   const [major = 0, minor = 0, patch = 0] = String(version)
@@ -24,9 +41,23 @@ module.exports = {
   expo: {
     ...base,
     version: pkg.version,
+    extra: {
+      ...(base.extra || {}),
+      storeBuild,
+      /** 上架时改成可在中国大陆访问的 HTTPS 隐私政策地址 */
+      privacyPolicyUrl:
+        process.env.PRIVACY_POLICY_URL ||
+        'https://github.com/846515182/SnoreSleepMonitor/blob/main/PRIVACY.md',
+    },
     android: {
       ...base.android,
       versionCode: versionToCode(pkg.version),
+      ...(storeBuild
+        ? {
+            permissions: storePermissions,
+            blockedPermissions: storeBlockedPermissions,
+          }
+        : {}),
     },
     ios: {
       ...base.ios,
