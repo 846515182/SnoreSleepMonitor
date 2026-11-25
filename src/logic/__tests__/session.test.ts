@@ -97,3 +97,24 @@ test('summarizeSession 最短时长为 1 秒，避免除零', () => {
   assert.equal(s.qualityScore, 100);
   assert.equal(s.apneaRisk, 'low');
 });
+
+test('录音质量结论原样写入会话（旧会话没有该字段也不报错）', () => {
+  const audioQuality = {
+    level: 'fair' as const,
+    coverage: 0.92,
+    clippedRatio: 0.01,
+    avgSnrDb: 9.5,
+    noiseFloorDb: -43,
+    issues: ['环境底噪偏高，可能影响识别准确度'],
+  };
+  const withQuality = summarizeSession({
+    startTime: 0,
+    endTime: 3600_000,
+    events: [],
+    audioQuality,
+  });
+  assert.deepEqual(withQuality.audioQuality, audioQuality);
+
+  const legacy = summarizeSession({ startTime: 0, endTime: 3600_000, events: [] });
+  assert.equal(legacy.audioQuality, undefined);
+});

@@ -5,7 +5,7 @@
  * 正常停止监测与崩溃恢复两条路径共用同一套统计，避免口径漂移。
  */
 
-import type { ApneaRisk, SleepSession, SoundEvent } from '../types';
+import type { ApneaRisk, AudioQuality, SleepSession, SoundEvent } from '../types';
 import { calculateQualityScore } from './score';
 
 /** AHI 简化版阈值（疑似暂停次数 / 小时）：>=15 高风险，>=5 中风险 */
@@ -22,6 +22,8 @@ export interface SummarizeInput {
   eventsTruncated?: boolean;
   /** 监测被中断后恢复的记录 */
   interrupted?: boolean;
+  /** 录音质量结论（由 SignalQualityMonitor 生成） */
+  audioQuality?: AudioQuality;
 }
 
 function sumByType(events: SoundEvent[], type: SoundEvent['type']): {
@@ -104,6 +106,7 @@ export function summarizeSession(input: SummarizeInput): SleepSession {
     apneaRisk: computeRisk(ahi),
     intensityBreakdown,
     eventsTruncated: input.eventsTruncated,
+    audioQuality: input.audioQuality,
     interrupted: input.interrupted,
   };
 }

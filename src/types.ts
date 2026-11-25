@@ -41,6 +41,26 @@ export interface SoundEvent {
 
 export type ApneaRisk = 'low' | 'moderate' | 'high';
 
+export type AudioQualityLevel = 'good' | 'fair' | 'poor';
+
+/**
+ * 录音质量结论：由覆盖率、削波率、环境底噪与信噪比汇总而来。
+ * 识别再准也需要可信的音频输入，这一项用于提示用户调整手机位置/环境。
+ */
+export interface AudioQuality {
+  level: AudioQualityLevel;
+  /** 实际收到的音频帧 / 应产生的帧，0–1 */
+  coverage: number;
+  /** 削波帧占比，0–1 */
+  clippedRatio: number;
+  /** 有效声音平均高出底噪的 dB 数（无样本时为 0） */
+  avgSnrDb: number;
+  /** 结束时估计的环境底噪（dBFS） */
+  noiseFloorDb: number;
+  /** 面向用户的中文原因，可直接展示 */
+  issues: string[];
+}
+
 export interface SleepSession {
   id: string;
   startTime: number;
@@ -73,6 +93,8 @@ export interface SleepSession {
   eventsTruncated?: boolean;
   /** 鼾声强度分布 */
   intensityBreakdown?: { mild: number; moderate: number; severe: number };
+  /** 录音质量评估（旧会话/兼容模式可能没有） */
+  audioQuality?: AudioQuality;
   /** 监测是否被中断（应用被杀 / 重启后恢复） */
   interrupted?: boolean;
 }

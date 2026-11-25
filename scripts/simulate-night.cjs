@@ -12,6 +12,9 @@ const { SoundEventDetector } = require('../test-dist/logic/detector.js');
 const { ApneaTracker } = require('../test-dist/logic/apnea.js');
 const { summarizeSession } = require('../test-dist/logic/session.js');
 const { planEventAudio } = require('../test-dist/logic/clips.js');
+const { NoiseFloorTracker, adaptiveThresholds } = require('../test-dist/logic/noiseFloor.js');
+const { ConfidenceSmoother, topEventClass } = require('../test-dist/logic/confidenceSmoother.js');
+const { SignalQualityMonitor } = require('../test-dist/logic/audioQuality.js');
 
 const FRAME_MS = 975;
 const TH = {
@@ -148,24 +151,43 @@ function main() {
 
   const detector = new SoundEventDetector();
   const apnea = new ApneaTracker({ minSilenceMs: 15_000 });
+  const floorTracker = new NoiseFloorTracker();
+  const smoother = new ConfidenceSmoother();
+  const quality = new SignalQualityMonitor();
   const events = [];
   const apneas = [];
 
   for (const f of frames) {
-    const input = frameAt(f.scene, f.index);
-    const flags = logic.classifyFrame(input, TH);
+    const raw = frameAt(f.scene, f.index);
+    // 与 App.applyNativeResult 完全一致的顺序：底噪 → 平滑 → 自适应阈值 → 分类
+    const floor = floorTracker.push(raw.amplitudeDb);
+    const smoothed = smoother.push(raw.confidences);
+    const margin = floor.calibrated ? raw.amplitudeDb - floor.floorDb : 0;
+    quality.push({
+      amplitudeDb: raw.amplitudeDb,
+      snrDb: floor.calibrated && margin >= 10 ? margin : undefined,
+    });
+    const input = { ...raw, topClass: topEventClass(smoothed), confidences: smoothed };
+    const adaptive = floor.calibrated ? adaptiveThresholds(floor.floorDb) : {};
+    const flags = logic.classifyFrame(input, { ...TH, ...adaptive });
+
     const ap = apnea.onFrame(f.t, { loud: flags.loud || flags.apneaSound, breath: flags.breath });
     if (ap) {
       apneas.push(ap);
       events.push({ start: ap.start, end: ap.end, duration: ap.duration, type: 'apnea' });
     }
-    const evt = detector.push(f.t, flags, input.confidences.snoring ?? 0, input.amplitudeDb);
+    const evt = detector.push(f.t, flags, smoothed.snoring ?? 0, raw.amplitudeDb);
     if (evt) events.push(evt);
   }
   const tail = detector.flush();
   if (tail) events.push(tail);
 
-  const summary = summarizeSession({ startTime: 0, endTime, events });
+  const summary = summarizeSession({
+    startTime: 0,
+    endTime,
+    events,
+    audioQuality: quality.summary(endTime, floorTracker.currentFloorDb),
+  });
   const plan = planEventAudio(events);
 
   const label = { snore: '打鼾', grind: '磨牙', talk: '梦话', apnea: '呼吸暂停', turn: '翻身', noise: '环境噪音' };
@@ -201,6 +223,11 @@ function main() {
   console.log(`  睡眠质量分 ${summary.qualityScore}   暂停风险 ${summary.apneaRisk}（疑似 ${(summary.apneaCount / (endTime / 3.6e6)).toFixed(2)} 次/小时）`);
   console.log(`  鼾声分级：轻 ${summary.intensityBreakdown.mild} · 中 ${summary.intensityBreakdown.moderate} · 重 ${summary.intensityBreakdown.severe}`);
   console.log(`  保留音频：${plan.ranges.length} 段，共 ${dur(plan.totalMs)}`);
+  const q = summary.audioQuality;
+  console.log(
+    `  录音质量：${q ? q.level : '未评估'}  覆盖率 ${q ? Math.round(q.coverage * 100) : 0}%  底噪 ${q ? q.noiseFloorDb : '—'}dB  削波 ${q ? (q.clippedRatio * 100).toFixed(1) : '0'}%`
+  );
+  if (q && q.issues.length > 0) console.log(`  质量提示：${q.issues.join('；')}`);
 
   // ---------- 断言：这份"用户看到的报告"应该满足的现实预期 ----------
   const byType = (type) => events.filter((e) => e.type === type);
@@ -277,6 +304,16 @@ function main() {
         .concat(byType('grind'), byType('turn'))
         .every((e) => plan.offsets[events.indexOf(e)] >= 0),
       '鼾声 110 分钟仍留有 45 分钟预算给稀有声事件',
+    ],
+    [
+      '录音质量评估为良好（无掉帧/削波/高底噪）',
+      summary.audioQuality?.level === 'good',
+      JSON.stringify(summary.audioQuality),
+    ],
+    [
+      '空调房自适应阈值自动抬高噪音门槛',
+      adaptiveThresholds(-44).noiseMinDb > logic.NOISE_MIN_DB,
+      `${adaptiveThresholds(-44).noiseMinDb} vs 固定 ${logic.NOISE_MIN_DB}`,
     ],
     ['每条事件时长自洽', events.every((e) => e.end >= e.start), ''],
   ];

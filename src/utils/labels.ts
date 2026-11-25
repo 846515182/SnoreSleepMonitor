@@ -2,7 +2,7 @@
  * 展示层文案与语义色（依赖主题 token，故颜色函数需传入 Theme）。
  */
 
-import type { ApneaRisk, SnoreIntensity, SoundEventType } from '../types';
+import type { ApneaRisk, AudioQualityLevel, SnoreIntensity, SoundEventType } from '../types';
 import type { Theme } from '../theme';
 
 /** 徽标底色：与其上的 onAccent 文字保持 ≥ 4.5:1 对比度 */
@@ -10,6 +10,33 @@ export function getQualityColor(score: number, T: Theme): string {
   if (score >= 85) return T.success;
   if (score >= 60) return T.qualityMid;
   return T.danger;
+}
+
+/** 录音质量文字：旧会话没有评估结果时显示「未评估」 */
+export function getAudioQualityLabel(level?: AudioQualityLevel): string {
+  switch (level) {
+    case 'good':
+      return '良好';
+    case 'fair':
+      return '一般';
+    case 'poor':
+      return '较差';
+    default:
+      return '未评估';
+  }
+}
+
+export function getAudioQualityColor(level: AudioQualityLevel | undefined, T: Theme): string {
+  switch (level) {
+    case 'good':
+      return T.success;
+    case 'fair':
+      return T.qualityMid;
+    case 'poor':
+      return T.danger;
+    default:
+      return T.textSecondary;
+  }
 }
 
 export function getIntensityLabel(intensity: SnoreIntensity): string {

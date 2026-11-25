@@ -2,7 +2,12 @@ import React from 'react';
 import { Text, TouchableOpacity, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
-import { getApneaRiskColor, getApneaRiskLabel, getQualityColor } from '../utils/labels';
+import {
+  getApneaRiskColor,
+  getApneaRiskLabel,
+  getAudioQualityLabel,
+  getQualityColor,
+} from '../utils/labels';
 import type { SleepSession } from '../types';
 import type { Theme } from '../theme';
 import type { AppStyles } from '../styles';
@@ -40,6 +45,18 @@ export function HistoryRow({ session, T, styles, onPress }: HistoryRowProps) {
               <Ionicons name="alert-circle-outline" size={14} color={T.warningText} />
               <Text style={[styles.historyMeta, { color: T.warningText }]}>
                 录音中断，记录可能不完整
+              </Text>
+            </View>
+          )}
+          {session.audioQuality && session.audioQuality.level !== 'good' && (
+            <View style={styles.historyMetaRow}>
+              <Ionicons
+                name={session.audioQuality.level === 'poor' ? 'mic-off-outline' : 'mic-outline'}
+                size={14}
+                color={T.warningText}
+              />
+              <Text style={[styles.historyMeta, { color: T.warningText }]}>
+                录音质量{getAudioQualityLabel(session.audioQuality.level)}
               </Text>
             </View>
           )}

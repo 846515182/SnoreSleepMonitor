@@ -162,6 +162,33 @@ test('所有可听声音都记录：风扇/呼吸声归为噪音，安静帧不�
   );
 });
 
+test('自适应音量阈值可覆盖固定值（安静房间放宽、空调房收紧）', () => {
+  const softSnore = {
+    topClass: 'snoring',
+    confidences: { snoring: 0.9, noise: 0.05 },
+    amplitudeDb: -52,
+  };
+  assert.equal(classifyFrame(softSnore, TH).snore, false, '默认 -48 下限挡住 -52dB');
+  assert.equal(
+    classifyFrame(softSnore, { ...TH, snoreMinDb: -58 }).snore,
+    true,
+    '安静房间底噪低，应能记到更轻的鼾声'
+  );
+  assert.equal(
+    classifyFrame(softSnore, { ...TH, snoreMinDb: -40 }).snore,
+    false,
+    '开空调的房间抬高门槛后不再命中'
+  );
+
+  const quietNoise = { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -55 };
+  assert.equal(classifyFrame(quietNoise, TH).noise, false, '默认 -52 下限挡住 -55dB');
+  assert.equal(
+    classifyFrame(quietNoise, { ...TH, noiseMinDb: -58 }).noise,
+    true,
+    '安静房间能记录到更轻的环境声'
+  );
+});
+
 test('噪音帧用 YAMNet 原始类别生成中文文字标签', () => {
   const cough = classifyFrame(
     { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -40, yamnetClass: 'Cough' },

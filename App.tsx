@@ -34,7 +34,7 @@ import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 
-import type { Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
+import type { AudioQuality, Screen, SleepSession, SoundEvent, ThemePreference } from './src/types';
 import { ApneaTracker, apneaMinSilenceMs, type ApneaEvent } from './src/logic/apnea';
 import { clipFinished, clipStartMs, planEventAudio, selectSnoreClips } from './src/logic/clips';
 import {
@@ -44,6 +44,9 @@ import {
   DEFAULT_TALK_CONFIDENCE,
   DEFAULT_TURN_CONFIDENCE,
 } from './src/logic/frame';
+import { adaptiveThresholds, NoiseFloorTracker } from './src/logic/noiseFloor';
+import { ConfidenceSmoother, topEventClass } from './src/logic/confidenceSmoother';
+import { SignalQualityMonitor } from './src/logic/audioQuality';
 import { SoundEventDetector } from './src/logic/detector';
 import { compareVersion } from './src/logic/version';
 import { summarizeSession } from './src/logic/session';
@@ -52,6 +55,8 @@ import { formatClock, formatDuration, formatTime } from './src/utils/format';
 import {
   getApneaRiskColor,
   getApneaRiskLabel,
+  getAudioQualityColor,
+  getAudioQualityLabel,
   getEventColor,
   getEventTextColor,
   getEventLabel,
@@ -280,6 +285,12 @@ function AppInner() {
   const monitorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** 声音事件状态机（纯逻辑，见 src/logic/detector.ts，可用模拟数据单测） */
   const detectorRef = useRef<SoundEventDetector>(new SoundEventDetector());
+  /** 自适应噪声底：用最近 10 分钟滑动 P10 估计环境底噪，驱动音量阈值 */
+  const noiseFloorRef = useRef<NoiseFloorTracker>(new NoiseFloorTracker());
+  /** 置信度平滑：快攻慢放 EMA，抑制单帧抖动，同时不吞掉短事件 */
+  const confSmootherRef = useRef<ConfidenceSmoother>(new ConfidenceSmoother());
+  /** 录音质量：覆盖率 / 削波 / 底噪 / 信噪比，停止时汇总进会话 */
+  const qualityRef = useRef<SignalQualityMonitor>(new SignalQualityMonitor());
   /** 呼吸暂停状态机：带上限与呼吸声上下文，避免“安静一整晚”被误判为一次长暂停 */
   const apneaTrackerRef = useRef<ApneaTracker>(
     new ApneaTracker({ minSilenceMs: apneaMinSilenceMs(DEFAULT_APNEA_CONFIDENCE) })
@@ -581,6 +592,7 @@ function AppInner() {
         eventsTruncated?: boolean;
         recordingUri?: string;
         recordingMode?: 'snore' | 'full';
+        audioQuality?: AudioQuality;
       };
       const startTime = typeof snap.startTime === 'number' ? snap.startTime : 0;
       const lastElapsedMs = typeof snap.lastElapsedMs === 'number' ? snap.lastElapsedMs : 0;
@@ -610,6 +622,15 @@ function AppInner() {
             : 'full'
           : undefined,
         eventsTruncated: snap.eventsTruncated,
+        // 兼容旧快照：字段缺失或结构异常时忽略，不能让恢复流程失败
+        audioQuality:
+          snap.audioQuality &&
+          (snap.audioQuality.level === 'good' ||
+            snap.audioQuality.level === 'fair' ||
+            snap.audioQuality.level === 'poor') &&
+          Array.isArray(snap.audioQuality.issues)
+            ? snap.audioQuality
+            : undefined,
         interrupted: true,
       });
       // 极端情况下快照和已落盘会话会指向同一次监测：按 id 去重，别生成两条一样的历史。
@@ -679,6 +700,11 @@ function AppInner() {
         eventsTruncated: monitorRef.current.eventsTruncated,
         recordingUri: recordingUriRef.current || undefined,
         recordingMode: recordingModeRef.current,
+        // 崩溃恢复后仍能显示录音质量结论；无法评估时为 undefined，不影响恢复
+        audioQuality: qualityRef.current.summary(
+          lastElapsedMs,
+          noiseFloorRef.current.currentFloorDb
+        ),
       });
     } catch (e) {
       console.warn('序列化监测快照失败', e);
@@ -1049,6 +1075,10 @@ function AppInner() {
       setElapsedSeconds(0);
       setVolumeDb(-100);
       detectorRef.current.reset();
+      // 每场监测重新校准底噪与置信度平滑，绝不能把上一晚的环境状态带进来
+      noiseFloorRef.current.reset();
+      confSmootherRef.current.reset();
+      qualityRef.current.reset();
       maxVolumeDbRef.current = -100;
       apneaTrackerRef.current.reset();
       apneaTrackerRef.current.setMinSilenceMs(apneaMinSilenceMs(apneaThreshold));
@@ -1122,10 +1152,9 @@ function AppInner() {
     try {
       const metering = typeof result.amplitudeDb === 'number' ? result.amplitudeDb : -100;
       const confs: Record<string, number> = result.confidences || {};
-      const sConf = confs.snoring ?? 0;
-      const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
       const yamnetClass = typeof result.yamnetClass === 'string' ? result.yamnetClass : undefined;
       const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
+      const peakDb = typeof result.peakDb === 'number' ? result.peakDb : undefined;
       setVolumeDb(metering);
       if (metering > maxVolumeDbRef.current) {
         maxVolumeDbRef.current = metering;
@@ -1142,15 +1171,32 @@ function AppInner() {
       lastWindowIdRef.current = windowId;
       if (result.stalled === true) audioStalledRef.current = true;
 
+      // 只有「新推理帧」才参与底噪/平滑/质量统计：轮询与推送会带来同一 windowId 的重复快照。
+      const floor = noiseFloorRef.current.push(metering);
+      const smoothed = confSmootherRef.current.push(confs);
+      const sConf = smoothed.snoring ?? 0;
+      const tClass = topEventClass(smoothed);
+      const audibleMargin = floor.calibrated ? metering - floor.floorDb : 0;
+      qualityRef.current.push({
+        amplitudeDb: metering,
+        peakDb,
+        clipped: result.clipped === true,
+        // 只有明显高于底噪的帧才参与 SNR 平均；整晚大部分静音帧会把均值拖成 0。
+        snrDb: floor.calibrated && audibleMargin >= 10 ? audibleMargin : undefined,
+      });
+
       // 帧级分类收敛到 src/logic/frame.ts：App 与「整晚模拟」测试用同一套规则。
       // 阈值取本次渲染的 state：轮询路径经 applyNativeResultRef 调用，闭包始终是最新一次渲染的。
+      // 音量门槛随环境底噪自适应：安静房间能记到更轻的声音，空调房则自动抬高避免底噪刷屏。
+      const adaptive = floor.calibrated ? adaptiveThresholds(floor.floorDb) : {};
       const flags = classifyFrame(
-        { topClass: tClass, confidences: confs, amplitudeDb: metering, yamnetClass },
+        { topClass: tClass, confidences: smoothed, amplitudeDb: metering, yamnetClass },
         {
           snore: snoreThreshold,
           grind: grindThreshold,
           talk: talkThreshold,
           turn: DEFAULT_TURN_CONFIDENCE,
+          ...adaptive,
         }
       );
 
@@ -1373,6 +1419,11 @@ function AppInner() {
         recordingUri: uri,
         recordingMode,
         eventsTruncated: monitorRef.current.eventsTruncated,
+        // 录音质量：覆盖率/削波/底噪/信噪比，停止时一次性汇总
+        audioQuality: qualityRef.current.summary(
+          endTime - startTimeRef.current,
+          noiseFloorRef.current.currentFloorDb
+        ),
         // 录音线程中途停过：别让用户以为整晚都录到了
         interrupted: audioStalledRef.current || undefined,
       });
@@ -2214,8 +2265,27 @@ function AppInner() {
             <MetricRow icon="pulse-outline" color={T.apneaText} label="呼吸暂停时长" value={formatDuration(selectedSession.totalApneaSeconds)} styles={styles} />
             <MetricRow icon="swap-horizontal-outline" color={T.turnText} label="翻身时长" value={formatDuration(selectedSession.totalTurnSeconds ?? 0)} styles={styles} />
             <MetricRow icon="volume-medium-outline" color={T.noiseText} label="环境噪音时长" value={formatDuration(selectedSession.totalNoiseSeconds ?? 0)} styles={styles} />
+            <MetricRow
+              icon="mic-outline"
+              color={getAudioQualityColor(selectedSession.audioQuality?.level, T)}
+              label="录音质量"
+              value={
+                selectedSession.audioQuality
+                  ? `${getAudioQualityLabel(selectedSession.audioQuality.level)} · 覆盖率 ${Math.round(
+                      selectedSession.audioQuality.coverage * 100
+                    )}%`
+                  : '未评估'
+              }
+              styles={styles}
+            />
             <MetricRow icon="list-outline" color={T.textSecondary} label="事件总数" value={selectedSession.events.length} divider={false} styles={styles} />
           </View>
+
+          {selectedSession.audioQuality && selectedSession.audioQuality.issues.length > 0 && (
+            <Text style={styles.disclaimerText}>
+              录音质量提示：{selectedSession.audioQuality.issues.join('；')}。
+            </Text>
+          )}
 
           <Text style={styles.disclaimerText}>
             翻身以及咳嗽、喷嚏、说话、开关门、家电、交通等环境噪音都会逐条记录并标注识别到的声音，只做记录与回放，不计入睡眠质量评分。

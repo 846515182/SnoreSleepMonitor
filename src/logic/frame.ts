@@ -50,6 +50,13 @@ export interface Thresholds {
   talk: number;
   /** 翻身/床体噪声阈值，默认 DEFAULT_TURN_CONFIDENCE */
   turn?: number;
+  /**
+   * 自适应音量下限（可选）。不传时使用固定常量，保持旧调用方与测试行为不变；
+   * App 会按环境底噪动态传入，避免安静房间漏记、空调房误报。
+   */
+  snoreMinDb?: number;
+  turnMinDb?: number;
+  noiseMinDb?: number;
 }
 
 export interface FrameFlags {
@@ -84,9 +91,12 @@ export function classifyFrame(frame: FrameInput, t: Thresholds): FrameFlags {
   const aConf = frame.confidences.apnea ?? 0;
   const rConf = frame.confidences.turn ?? 0;
   const turnThreshold = t.turn ?? DEFAULT_TURN_CONFIDENCE;
+  const snoreMinDb = t.snoreMinDb ?? SNORE_MIN_DB;
+  const turnMinDb = t.turnMinDb ?? TURN_MIN_DB;
+  const noiseMinDb = t.noiseMinDb ?? NOISE_MIN_DB;
 
   const snore =
-    frame.topClass === 'snoring' && sConf >= t.snore && frame.amplitudeDb >= SNORE_MIN_DB;
+    frame.topClass === 'snoring' && sConf >= t.snore && frame.amplitudeDb >= snoreMinDb;
 
   // 磨牙：置信度必须过用户阈值（此前这个阈值是死的），并且要压过鼾声/梦话；
   // 只有 high-confidence 或 top 类别明确是 grinding 才算，避免翻身、呼吸被算进来。
@@ -103,14 +113,14 @@ export function classifyFrame(frame: FrameInput, t: Thresholds): FrameFlags {
    * 也避免"房间里刚好有点摩擦声"就把其他事件改判成翻身。音量下限挡掉远处环境声。
    */
   const turn =
-    frame.topClass === 'turn' && rConf >= turnThreshold && frame.amplitudeDb >= TURN_MIN_DB;
+    frame.topClass === 'turn' && rConf >= turnThreshold && frame.amplitudeDb >= turnMinDb;
 
   /**
    * 其他声音：既不是鼾声/磨牙/梦话/翻身，但确实有可听音量。
    * 这些声音以前会被直接丢掉；现在统一收进噪音事件，并用 YAMNet 原始类别
    * 生成「咳嗽声」「狗叫声」「开关门声」等中文标签，做到「所有声音都记录」。
    */
-  const noise = !(snore || grind || talk || turn) && frame.amplitudeDb >= NOISE_MIN_DB;
+  const noise = !(snore || grind || talk || turn) && frame.amplitudeDb >= noiseMinDb;
 
   const loud = snore || grind || talk || turn || noise;
   // 原始类别标签对所有可听帧都保留：稳态风扇可能被误判成 snoring，
