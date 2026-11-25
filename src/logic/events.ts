@@ -13,7 +13,7 @@
  * 这两条能把绝大部分稳态噪声挡掉，又不会误伤真人（真人不可能一直用完全相同的音量打鼾）。
  */
 
-export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn';
+export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn' | 'noise';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
 /** 一段「打鼾」至少持续 5 秒：再短就分不清是咳嗽/翻身还是真的一口鼾 */
@@ -65,6 +65,17 @@ export const MIN_TURN_FRAMES = 2;
 export const MIN_TURN_RATIO = 0.5;
 /** 单条翻身记录上限：超过 2 分钟更像是持续摩擦（空调摆风/床垫共振）而非一次翻身 */
 export const MAX_TURN_MS = 120_000;
+
+/**
+ * 其他声音（环境噪音）逐条记录的门槛。
+ * 至少 2 帧（约 1 秒），避免单帧爆音/点击声刷屏；单条最长 1 小时。
+ * 空调、风扇这类连续底噪会被切成 1 小时一段，而不是变成一整晚的一条记录；
+ * 真实的长鼾（几十分钟）也不会被切成一堆碎片。
+ */
+export const MIN_NOISE_MS = 900;
+export const MIN_NOISE_FRAMES = 2;
+/** 单条记录的最长时长：状态机在 1 小时处切段 */
+export const MAX_NOISE_MS = 3_600_000;
 /**
  * 静音宽限期：小于此值的静音不结束事件。
  *
@@ -86,6 +97,8 @@ export interface FrameCounts {
    * 可选：老快照/外部调用方不带这个字段时按 0 处理，不必强制改造所有调用点。
    */
   turn?: number;
+  /** 其他可听声音（环境噪音）帧；可选，老快照按 0 处理 */
+  noise?: number;
   total: number;
 }
 
@@ -135,11 +148,18 @@ export function classifyFinalEvent(
   stats: EpisodeStats
 ): ClassifiedEvent | null {
   const total = counts.total > 0 ? counts.total : 0;
-  const snoreRatio = total > 0 ? counts.snore / total : 0;
-  const grindRatio = total > 0 ? counts.grind / total : 0;
-  const talkRatio = total > 0 ? counts.talk / total : 0;
+  const noiseFrames = counts.noise ?? 0;
+  /**
+   * 鼾声/磨牙/梦话/翻身的分母排除「其他声音」帧：
+   * 风扇、空调、说话声混在鼾声事件里时，不会把鼾声帧占比稀释到门槛以下。
+   * 老调用方不带 noise 字段时 typedTotal === total，行为与之前完全一致。
+   */
+  const typedTotal = Math.max(0, total - noiseFrames);
+  const snoreRatio = typedTotal > 0 ? counts.snore / typedTotal : 0;
+  const grindRatio = typedTotal > 0 ? counts.grind / typedTotal : 0;
+  const talkRatio = typedTotal > 0 ? counts.talk / typedTotal : 0;
   const turnFrames = counts.turn ?? 0;
-  const turnRatio = total > 0 ? turnFrames / total : 0;
+  const turnRatio = typedTotal > 0 ? turnFrames / typedTotal : 0;
 
   const enoughSnore =
     counts.snore >= MIN_SNORE_FRAMES &&
@@ -190,6 +210,17 @@ export function classifyFinalEvent(
     durationMs <= MAX_TURN_MS
   ) {
     return { type: 'turn' };
+  }
+
+  // 其他声音兜底：所有没被归成鼾声/梦话/磨牙/翻身的可听声音，
+  // 都记录为环境噪音（包括被鼾声门槛拒掉的稳态风扇、低置信度人声等）。
+  // 这保证「所有声音都记录」，而不是像以前那样整段丢弃。
+  if (
+    total >= MIN_NOISE_FRAMES &&
+    durationMs >= MIN_NOISE_MS &&
+    durationMs <= MAX_NOISE_MS
+  ) {
+    return { type: 'noise' };
   }
 
   return null;

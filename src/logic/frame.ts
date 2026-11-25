@@ -5,6 +5,8 @@
  * 抄错了也发现不了；现在收敛到这里，单元测试跑的就是线上那一套。
  */
 
+import { describeYamnetClass } from './noiseLabels';
+
 /** 鼾声的最低音量（dBFS）：太轻的声音不可能是一个人躺在手机旁边打鼾 */
 export const SNORE_MIN_DB = -48;
 
@@ -13,6 +15,13 @@ export const SNORE_MIN_DB = -48;
  * 再低就只剩远处环境声，不能算翻身。
  */
 export const TURN_MIN_DB = -55;
+
+/**
+ * 其他声音（环境噪音）的最低音量。
+ * 低于 -52dB 基本是房间底噪（空调低频、窗外远路），收进来只会刷屏；
+ * 咳嗽、喷嚏、说话、开关门、狗叫、电视等一旦到了这个音量，就逐条记录。
+ */
+export const NOISE_MIN_DB = -52;
 
 /** YAMNet 异常呼吸音（喘息/喘鸣/喷气）置信度：只用于确认一次暂停结束 */
 export const APNEA_SOUND_CONF = 0.45;
@@ -31,6 +40,8 @@ export interface FrameInput {
   confidences: Record<string, number>;
   /** 本帧音量，dBFS（-100 表示几乎无声） */
   amplitudeDb: number;
+  /** YAMNet 原始类别名（如 "Cough"），用于给噪音事件生成中文文字标签 */
+  yamnetClass?: string;
 }
 
 export interface Thresholds {
@@ -47,12 +58,16 @@ export interface FrameFlags {
   talk: boolean;
   /** 翻身 / 床体噪声帧 */
   turn: boolean;
+  /** 其他可听声音（不属于上面四类），会被记录为环境噪音事件 */
+  noise: boolean;
   /** 异常呼吸音（不代表一定是事件） */
   apneaSound: boolean;
-  /** 任意事件帧：用于锚定静音起点、合并事件 */
+  /** 任意可听声音帧：用于锚定静音起点、合并事件 */
   loud: boolean;
   /** 呼吸类声音：用于「收口」一次疑似暂停 */
   breath: boolean;
+  /** 噪音帧识别到的具体声音中文标签（如「咳嗽声」） */
+  soundLabel?: string;
 }
 
 /**
@@ -90,8 +105,28 @@ export function classifyFrame(frame: FrameInput, t: Thresholds): FrameFlags {
   const turn =
     frame.topClass === 'turn' && rConf >= turnThreshold && frame.amplitudeDb >= TURN_MIN_DB;
 
-  const loud = snore || grind || talk || turn;
+  /**
+   * 其他声音：既不是鼾声/磨牙/梦话/翻身，但确实有可听音量。
+   * 这些声音以前会被直接丢掉；现在统一收进噪音事件，并用 YAMNet 原始类别
+   * 生成「咳嗽声」「狗叫声」「开关门声」等中文标签，做到「所有声音都记录」。
+   */
+  const noise = !(snore || grind || talk || turn) && frame.amplitudeDb >= NOISE_MIN_DB;
+
+  const loud = snore || grind || talk || turn || noise;
+  // 原始类别标签对所有可听帧都保留：稳态风扇可能被误判成 snoring，
+  // 事件兜底成噪音时仍能用「室内环境声」这类文字标注，而不是只能显示「环境噪音」。
+  const soundLabel = loud ? describeYamnetClass(frame.yamnetClass) : undefined;
   const apneaSound = aConf >= APNEA_SOUND_CONF;
 
-  return { snore, grind, talk, turn, apneaSound, loud, breath: snore || apneaSound };
+  return {
+    snore,
+    grind,
+    talk,
+    turn,
+    noise,
+    apneaSound,
+    loud,
+    breath: snore || apneaSound,
+    ...(soundLabel ? { soundLabel } : {}),
+  };
 }

@@ -103,6 +103,7 @@ export interface Theme {
   talkText: string;
   apneaText: string;
   turnText: string;
+  noiseText: string;
 
   /** 比语义色更深一档，用于文字/徽标底色上的前景 */
   qualityMid: string;
@@ -160,6 +161,7 @@ export const lightTheme: Theme = {
   talkText: '#6633A6',
   apneaText: '#B3241F',
   turnText: '#1B5490',
+  noiseText: '#4F5D6B',
 
   qualityMid: '#E8B930',
   dangerStrong: '#D93B2B',
@@ -210,6 +212,7 @@ export const darkTheme: Theme = {
   talkText: '#CB9FF0',
   apneaText: '#FF9A8F',
   turnText: '#9BCBF2',
+  noiseText: '#C3CFDB',
 
   qualityMid: '#FFCB4D',
   dangerStrong: '#FF7A66',

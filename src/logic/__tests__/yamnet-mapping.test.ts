@@ -94,3 +94,15 @@ test('原生聚合里有 turn，且 noise 把 turn 一起减掉', () => {
     'noise 没有把 turn 扣掉，各分数加起来会超过 1'
   );
 });
+
+test('原生层回传 YAMNet 原始类别名，供环境噪音生成中文文字标签', () => {
+  assert.ok(plugin.includes('private var latestYamnetClass'), '原生模块没有保存原始类别');
+  assert.ok(
+    plugin.includes('map.putString("yamnetClass", latestYamnetClass)'),
+    'snapshot 没把 yamnetClass 回传给 JS'
+  );
+  assert.ok(
+    plugin.includes('val yamnetClass = if (rawTopIndex >= 0)'),
+    '没有从未聚合的 scores 里取原始 top 类别'
+  );
+});

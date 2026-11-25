@@ -426,6 +426,7 @@ export const makeStyles = (T: Theme) =>
     },
     historyCountRow: {
       flexDirection: 'row',
+      flexWrap: 'wrap',
       gap: spacing.sm,
       marginTop: spacing.xs,
     },

@@ -8,8 +8,10 @@
  * - apnea：疑似呼吸暂停（无声段）
  * - turn：翻身 / 床体噪声（床垫、床架、被褥摩擦与身体落床的闷响）
  *   属于正常睡眠行为，只做记录与回放，不计入质量评分
+ * - noise：其他可听声音（咳嗽、喷嚏、说话、狗叫、开关门、家电、交通等），
+ *   用 YAMNet 原始类别生成中文文字标签后逐条记录，同样不计入质量评分
  */
-export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn';
+export type SoundEventType = 'snore' | 'grind' | 'talk' | 'apnea' | 'turn' | 'noise';
 export type SnoreIntensity = 'mild' | 'moderate' | 'severe';
 
 export interface SoundEvent {
@@ -21,6 +23,11 @@ export interface SoundEvent {
   type: SoundEventType;
   /** 仅用于打鼾强度分级 */
   intensity?: SnoreIntensity;
+  /**
+   * 识别到的具体声音文字（仅 noise 事件使用），例如「咳嗽」「狗叫」「说话声」。
+   * 由 YAMNet 原始类别映射而来；没有可读标签时为 undefined，界面显示为「环境噪音」。
+   */
+  soundLabel?: string;
   /** 静音时长超过上限时被截断（保留字段，当前策略下不产生） */
   capped?: boolean;
   /**
@@ -46,11 +53,15 @@ export interface SleepSession {
   apneaCount: number;
   /** 翻身 / 床体噪声次数（正常生理行为，不计入质量评分） */
   turnCount: number;
+  /** 其他可听声音（环境噪音）次数 */
+  noiseCount: number;
   totalSnoreSeconds: number;
   totalGrindSeconds: number;
   totalTalkSeconds: number;
   totalApneaSeconds: number;
   totalTurnSeconds: number;
+  /** 环境噪音累计时长（秒） */
+  totalNoiseSeconds: number;
   recordingUri?: string;
   /** snore = 音频已裁成只剩鼾声片段；full = 整晚原始录音 */
   recordingMode?: 'snore' | 'full';

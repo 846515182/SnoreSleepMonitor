@@ -129,7 +129,7 @@ type ThresholdTab = 'snore' | 'grind' | 'talk' | 'apnea';
 const THRESHOLD_TABS: Array<{ key: ThresholdTab; label: string; desc: string }> = [
   { key: 'snore', label: '打鼾', desc: '“打鼾”置信度达到该阈值且持续达标才记录一次，推荐 40%–60%。' },
   { key: 'grind', label: '磨牙', desc: '“磨牙”置信度达到该阈值、连续 2 帧以上才记录（不再限制 1.5 秒），推荐 30%–45%。' },
-  { key: 'talk', label: '梦话', desc: '语音类声音置信度达到该阈值、持续 1 秒以上才记录；翻身属于另一类事件，不受此阈值影响。' },
+  { key: 'talk', label: '梦话', desc: '语音类声音置信度达到该阈值、持续 1 秒以上才记录；翻身与其他环境噪音属于独立记录，不受此阈值影响。' },
   {
     key: 'apnea',
     label: '暂停',
@@ -201,6 +201,8 @@ function AppInner() {
   /** 录音降噪：只处理保存的片段（80Hz 高通），识别仍用原始采样 */
   const [denoiseRecording, setDenoiseRecording] = useState(true);
   const [isSnoringNow, setIsSnoringNow] = useState(false);
+  /** 实时识别到的声音文字（打鼾/磨牙/梦话/翻身/咳嗽声…），用于界面上「用文字标出来」 */
+  const [currentSoundLabel, setCurrentSoundLabel] = useState('');
   const [isFallbackMode, setIsFallbackMode] = useState(false); // true = 使用 expo-av 降级，无 AI 模型
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   // UI 只读派生值：计数与时长都来自 reducer 内的单一聚合状态，不再各存一份
@@ -212,17 +214,21 @@ function AppInner() {
   const talkCount = monitorState.counts.talk;
   const apneaCount = monitorState.counts.apnea;
   const turnCount = monitorState.counts.turn;
+  const noiseCount = monitorState.counts.noise;
   const snoreSeconds = Math.floor(monitorState.totalsMs.snore / 1000);
   const grindSeconds = Math.floor(monitorState.totalsMs.grind / 1000);
   const talkSeconds = Math.floor(monitorState.totalsMs.talk / 1000);
   const apneaSeconds = Math.floor(monitorState.totalsMs.apnea / 1000);
   const turnSeconds = Math.floor(monitorState.totalsMs.turn / 1000);
-  // 「有声音的总时长」把翻身也算进来：它确实是房间里的声音，只是不进质量评分
-  const totalNoiseSeconds = Math.floor(
+  const noiseSeconds = Math.floor(monitorState.totalsMs.noise / 1000);
+  // 「有声音的总时长」把所有声音都算进来：翻身和环境噪音也确实是房间里的声音，
+  // 只是不计入质量评分。
+  const totalSoundSeconds = Math.floor(
     (monitorState.totalsMs.snore +
       monitorState.totalsMs.grind +
       monitorState.totalsMs.talk +
       monitorState.totalsMs.turn +
+      monitorState.totalsMs.noise +
       monitorState.ongoingMs) /
       1000
   );
@@ -519,11 +525,13 @@ function AppInner() {
           talkCount: s.talkCount ?? 0,
           apneaCount: s.apneaCount ?? 0,
           turnCount: s.turnCount ?? 0,
+          noiseCount: s.noiseCount ?? 0,
           totalSnoreSeconds: s.totalSnoreSeconds ?? 0,
           totalGrindSeconds: s.totalGrindSeconds ?? 0,
           totalTalkSeconds: s.totalTalkSeconds ?? 0,
           totalApneaSeconds: s.totalApneaSeconds ?? 0,
           totalTurnSeconds: s.totalTurnSeconds ?? 0,
+          totalNoiseSeconds: s.totalNoiseSeconds ?? 0,
           qualityScore: s.qualityScore ?? 100,
           apneaRisk: s.apneaRisk ?? 'low',
           intensityBreakdown: s.intensityBreakdown ?? { mild: 0, moderate: 0, severe: 0 },
@@ -1116,6 +1124,7 @@ function AppInner() {
       const confs: Record<string, number> = result.confidences || {};
       const sConf = confs.snoring ?? 0;
       const tClass = typeof result.topClass === 'string' ? result.topClass : 'noise';
+      const yamnetClass = typeof result.yamnetClass === 'string' ? result.yamnetClass : undefined;
       const windowId = typeof result.windowId === 'number' ? result.windowId : -1;
       setVolumeDb(metering);
       if (metering > maxVolumeDbRef.current) {
@@ -1136,7 +1145,7 @@ function AppInner() {
       // 帧级分类收敛到 src/logic/frame.ts：App 与「整晚模拟」测试用同一套规则。
       // 阈值取本次渲染的 state：轮询路径经 applyNativeResultRef 调用，闭包始终是最新一次渲染的。
       const flags = classifyFrame(
-        { topClass: tClass, confidences: confs, amplitudeDb: metering },
+        { topClass: tClass, confidences: confs, amplitudeDb: metering, yamnetClass },
         {
           snore: snoreThreshold,
           grind: grindThreshold,
@@ -1146,6 +1155,19 @@ function AppInner() {
       );
 
       setIsSnoringNow(flags.loud);
+      // 实时文字标注：让用户立刻看到「这一声被识别成了什么」，而不只是一个红点。
+      const liveLabel = flags.snore
+        ? '打鼾'
+        : flags.grind
+          ? '磨牙'
+          : flags.talk
+            ? '梦话'
+            : flags.turn
+              ? '翻身'
+              : flags.noise
+                ? flags.soundLabel || '环境噪音'
+                : '';
+      setCurrentSoundLabel((prev) => (prev === liveLabel ? prev : liveLabel));
       // loud = 任意事件帧，用于锚定静音起点；
       // breath = 鼾声帧或异常呼吸音，用于「收口」一次疑似暂停（普通噪声不收口）。
       trackSilence({ loud: flags.loud || flags.apneaSound, breath: flags.breath }, sessionElapsed);
@@ -1964,7 +1986,7 @@ function AppInner() {
         )}
       </View>
 
-      {/* 今晚统计：五类事件分两排三格，末排留空保持上下等宽 */}
+      {/* 今晚统计：六类事件分两排三格 */}
       <View style={styles.card}>
         <View style={styles.statsGrid}>
           <StatCard
@@ -2018,7 +2040,16 @@ function AppInner() {
             subText={formatDuration(apneaSeconds)}
             styles={styles}
           />
-          <View style={styles.statSpacer} />
+          <View style={styles.statDivider} />
+          <StatCard
+            variant="home"
+            icon="volume-medium"
+            color={T.noiseText}
+            value={noiseCount}
+            label="环境噪音"
+            subText={formatDuration(noiseSeconds)}
+            styles={styles}
+          />
         </View>
       </View>
 
@@ -2041,10 +2072,14 @@ function AppInner() {
         </View>
         <View style={styles.volumeRow}>
           <Text style={[styles.volumeState, { color: isSnoringNow ? T.dangerText : T.textSecondary }]}>
-            {isSnoringNow ? '● 检测到声音' : '○ 环境安静'}
+            {isSnoringNow
+              ? currentSoundLabel
+                ? `● 识别到${currentSoundLabel}`
+                : '● 检测到声音'
+              : '○ 环境安静'}
           </Text>
           <Text style={styles.volumeState}>
-            峰值 {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'} · 声音 {formatDuration(totalNoiseSeconds)}
+            峰值 {maxVolumeDb > -100 ? maxVolumeDb.toFixed(1) + ' dB' : '--'} · 声音 {formatDuration(totalSoundSeconds)}
           </Text>
         </View>
       </View>
@@ -2117,7 +2152,7 @@ function AppInner() {
             />
           )}
 
-          {/* 计数格：五类事件，两排三格，上下等宽 */}
+          {/* 计数格：六类事件，两排三格，上下等宽 */}
           <View style={styles.detailStatsGrid}>
             {(
               [
@@ -2151,7 +2186,15 @@ function AppInner() {
               value={selectedSession.apneaCount}
               label="呼吸暂停"
             />
-            <View style={styles.statSpacer} />
+            <View style={styles.statDivider} />
+            <StatCard
+              variant="detail"
+              styles={styles}
+              icon="volume-medium-outline"
+              color={T.noiseText}
+              value={selectedSession.noiseCount ?? 0}
+              label="环境噪音"
+            />
           </View>
 
           <View style={styles.badgePair}>
@@ -2170,11 +2213,12 @@ function AppInner() {
             <MetricRow icon="chatbubble-outline" color={T.talkText} label="梦话时长" value={formatDuration(selectedSession.totalTalkSeconds)} styles={styles} />
             <MetricRow icon="pulse-outline" color={T.apneaText} label="呼吸暂停时长" value={formatDuration(selectedSession.totalApneaSeconds)} styles={styles} />
             <MetricRow icon="swap-horizontal-outline" color={T.turnText} label="翻身时长" value={formatDuration(selectedSession.totalTurnSeconds ?? 0)} styles={styles} />
+            <MetricRow icon="volume-medium-outline" color={T.noiseText} label="环境噪音时长" value={formatDuration(selectedSession.totalNoiseSeconds ?? 0)} styles={styles} />
             <MetricRow icon="list-outline" color={T.textSecondary} label="事件总数" value={selectedSession.events.length} divider={false} styles={styles} />
           </View>
 
           <Text style={styles.disclaimerText}>
-            翻身属于正常睡眠行为，只做记录与回放，不计入睡眠质量评分。
+            翻身以及咳嗽、喷嚏、说话、开关门、家电、交通等环境噪音都会逐条记录并标注识别到的声音，只做记录与回放，不计入睡眠质量评分。
           </Text>
 
           <Text style={styles.disclaimerText}>
@@ -2280,7 +2324,7 @@ function AppInner() {
         <View style={styles.card}>
           <View style={styles.sectionTitleRow}>
             <Ionicons name="list-outline" size={16} color={T.text} />
-            <Text style={styles.sectionTitle}>异常声音事件</Text>
+            <Text style={styles.sectionTitle}>声音事件</Text>
           </View>
           {selectedSession.eventsTruncated && (
             <Text style={styles.disclaimerText}>当晚事件过多，仅保留前 {MAX_EVENTS_PER_SESSION} 条。</Text>
@@ -2290,7 +2334,7 @@ function AppInner() {
               <View style={[styles.eventIconCircle, { backgroundColor: `${T.success}15` }]}>
                 <Ionicons name="checkmark-circle-outline" size={24} color={T.successText} />
               </View>
-              <Text style={styles.noRecordingText}>未检测到异常声音事件</Text>
+              <Text style={styles.noRecordingText}>未记录到声音事件</Text>
             </View>
           ) : (
             <View style={styles.timeline}>
@@ -2315,7 +2359,8 @@ function AppInner() {
                   evt.type === 'snore' ? 'volume-high-outline' :
                   evt.type === 'grind' ? 'git-branch-outline' :
                   evt.type === 'talk' ? 'chatbubble-outline' :
-                  evt.type === 'turn' ? 'swap-horizontal-outline' : 'pulse-outline';
+                  evt.type === 'turn' ? 'swap-horizontal-outline' :
+                  evt.type === 'noise' ? 'volume-medium-outline' : 'pulse-outline';
                 return (
                   <TouchableOpacity
                     key={idx}
@@ -2333,7 +2378,7 @@ function AppInner() {
                     </View>
                     <View style={styles.eventBody}>
                       <Text style={[styles.eventIndex, { color: getEventTextColor(evt.type, T) }]}>
-                        #{idx + 1} {getEventLabel(evt.type, evt.intensity)}
+                        #{idx + 1} {getEventLabel(evt.type, evt.intensity, evt.soundLabel)}
                       </Text>
                       <Text style={styles.eventClock}>{formatClock(absStart)} · {(evt.duration / 1000).toFixed(1)}秒</Text>
                     </View>

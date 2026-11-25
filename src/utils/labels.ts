@@ -75,6 +75,8 @@ export function getEventTextColor(type: SoundEventType, T: Theme): string {
       return T.apneaText;
     case 'turn':
       return T.turnText;
+    case 'noise':
+      return T.noiseText;
     default:
       return T.textSecondary;
   }
@@ -82,7 +84,8 @@ export function getEventTextColor(type: SoundEventType, T: Theme): string {
 
 export function getEventLabel(
   type: SoundEventType,
-  intensity?: SnoreIntensity
+  intensity?: SnoreIntensity,
+  soundLabel?: string
 ): string {
   const base =
     type === 'snore'
@@ -95,9 +98,14 @@ export function getEventLabel(
             ? '呼吸暂停'
             : type === 'turn'
               ? '翻身'
-              : '未知';
+              : type === 'noise'
+                ? '环境噪音'
+                : '未知';
   if (type === 'snore' && intensity) {
     return `${base}(${getIntensityLabel(intensity)})`;
+  }
+  if (type === 'noise' && soundLabel) {
+    return `${base}（${soundLabel}）`;
   }
   return base;
 }

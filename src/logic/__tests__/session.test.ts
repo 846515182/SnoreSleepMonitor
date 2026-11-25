@@ -11,6 +11,7 @@ function evt(partial: Partial<SoundEvent> & { type: SoundEvent['type']; duration
     duration: partial.duration,
     type: partial.type,
     intensity: partial.intensity,
+    soundLabel: partial.soundLabel,
   };
 }
 
@@ -30,6 +31,7 @@ test('summarizeSession 统计计数与时长', () => {
     evt({ type: 'grind', duration: 500 }),
     evt({ type: 'talk', duration: 1000 }),
     evt({ type: 'apnea', duration: 15000 }),
+    evt({ type: 'noise', duration: 4000, soundLabel: '咳嗽声' }),
   ];
 
   const s = summarizeSession({
@@ -43,10 +45,12 @@ test('summarizeSession 统计计数与时长', () => {
   assert.equal(s.grindCount, 1);
   assert.equal(s.talkCount, 1);
   assert.equal(s.apneaCount, 1);
+  assert.equal(s.noiseCount, 1);
   assert.equal(s.totalSnoreSeconds, 5);
   assert.equal(s.totalGrindSeconds, 0); // 0.5s 向下取整
   assert.equal(s.totalTalkSeconds, 1);
   assert.equal(s.totalApneaSeconds, 15);
+  assert.equal(s.totalNoiseSeconds, 4);
   assert.deepEqual(s.intensityBreakdown, { mild: 1, moderate: 0, severe: 1 });
   assert.equal(s.id, '1000000');
 });
@@ -60,6 +64,21 @@ test('summarizeSession 的质量分不含呼吸暂停时长', () => {
   });
   assert.equal(s.qualityScore, 100, '暂停是无声区间，不应拉低质量分');
   assert.equal(s.totalApneaSeconds, 3600);
+});
+
+test('summarizeSession 的质量分不含环境噪音与翻身时长', () => {
+  const s = summarizeSession({
+    startTime: 0,
+    endTime: 3600_000,
+    events: [
+      evt({ type: 'noise', duration: 1_800_000, soundLabel: '风扇/空调声' }),
+      evt({ type: 'turn', duration: 1_800_000 }),
+    ],
+  });
+  assert.equal(s.qualityScore, 100, '环境噪音只做记录，不应拉低质量分');
+  assert.equal(s.noiseCount, 1);
+  assert.equal(s.totalNoiseSeconds, 1800);
+  assert.equal(s.totalTurnSeconds, 1800);
 });
 
 test('summarizeSession 疑似暂停指数与风险联动', () => {

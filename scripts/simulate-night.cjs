@@ -46,6 +46,10 @@ function frameAt(scene, i) {
         confidences: { grinding: 0.62, snoring: 0.1 },
         amplitudeDb: i % 2 === 0 ? -44 : -48,
       };
+    case 'cough':
+      return i % 3 === 0
+        ? { topClass: 'noise', confidences: { noise: 0.8 }, amplitudeDb: -40, yamnetClass: 'Cough' }
+        : { topClass: 'noise', confidences: { noise: 0.55 }, amplitudeDb: -56 };
     case 'turn':
       return i % 3 < 2
         ? { topClass: 'turn', confidences: { turn: 0.6, noise: 0.25 }, amplitudeDb: -42 }
@@ -59,7 +63,7 @@ function frameAt(scene, i) {
     case 'farSnore':
       return { topClass: 'snoring', confidences: { snoring: 0.58, noise: 0.3 }, amplitudeDb: -55 };
     case 'fan':
-      return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 };
+      return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40, yamnetClass: 'Inside, small room' };
     case 'quiet':
     default:
       return { topClass: 'noise', confidences: { noise: 0.65, snoring: 0.1 }, amplitudeDb: -56 };
@@ -78,7 +82,9 @@ const SCRIPT = [
   ['turn', 8, '01:00 翻身'],
   ['quiet', 900, ''],
   ['talkShort', 4, '01:20 梦话一句（约 1 秒）'],
-  ['quiet', 1800, ''],
+  ['quiet', 600, ''],
+  ['cough', 5, '01:30 咳嗽几声（应记为环境噪音·咳嗽声）'],
+  ['quiet', 1200, ''],
   ['grindLong', 10, '02:10 磨牙（约 9 秒）'],
   ['quiet', 600, ''],
   ['snore', 1800, '02:30 再打鼾'],
@@ -87,7 +93,9 @@ const SCRIPT = [
   ['quiet', 1800, ''],
   ['turn', 8, '04:20 翻身'],
   ['quiet', 1800, ''],
-  ['farSnore', 600, '客厅电视人声（不该记）'],
+  ['farSnore', 600, '客厅电视人声（-55dB，不该记）'],
+  ['quiet', 600, ''],
+  ['fan', 120, '04:40 空调/风扇持续噪音（应记为环境噪音）'],
   ['quiet', 600, ''],
   ['talk', 6, '05:10 梦话一段'],
   ['quiet', 1200, ''],
@@ -160,8 +168,8 @@ function main() {
   const summary = summarizeSession({ startTime: 0, endTime, events });
   const plan = planEventAudio(events);
 
-  const label = { snore: '打鼾', grind: '磨牙', talk: '梦话', apnea: '呼吸暂停', turn: '翻身' };
-  const color = { snore: '青', grind: '黄', talk: '紫', apnea: '红', turn: '蓝' };
+  const label = { snore: '打鼾', grind: '磨牙', talk: '梦话', apnea: '呼吸暂停', turn: '翻身', noise: '环境噪音' };
+  const color = { snore: '青', grind: '黄', talk: '紫', apnea: '红', turn: '蓝', noise: '灰' };
 
   console.log('\n========== 模拟一夜（8 小时，逐帧回放）==========');
   console.log(`帧数 ${frames.length}  ·  时长 ${dur(endTime)}  ·  帧间隔 ${FRAME_MS}ms`);
@@ -171,8 +179,9 @@ function main() {
   for (const e of events.slice().sort((a, b) => a.start - b.start)) {
     const i = events.indexOf(e);
     const audio = plan.offsets[i] >= 0 ? '（可回放）' : '（无音频）';
+    const name = e.type === 'noise' && e.soundLabel ? `环境噪音·${e.soundLabel}` : label[e.type];
     console.log(
-      `  ${clock(e.start)}  ${(label[e.type] + ' ').padEnd(6, '　')}  ${dur(e.duration).padStart(8)}  ${audio}`
+      `  ${clock(e.start)}  ${(name + ' ').padEnd(6, '　')}  ${dur(e.duration).padStart(8)}  ${audio}`
     );
   }
 
@@ -182,6 +191,7 @@ function main() {
     ['磨牙', summary.grindCount, summary.totalGrindSeconds],
     ['梦话', summary.talkCount, summary.totalTalkSeconds],
     ['翻身', summary.turnCount, summary.totalTurnSeconds],
+    ['环境噪音', summary.noiseCount, summary.totalNoiseSeconds],
     ['呼吸暂停', summary.apneaCount, summary.totalApneaSeconds],
   ];
   for (const [name, count, seconds] of rows) {
@@ -198,6 +208,11 @@ function main() {
     startTime: 0,
     endTime,
     events: events.filter((e) => e.type !== 'turn'),
+  });
+  const withoutNoise = summarizeSession({
+    startTime: 0,
+    endTime,
+    events: events.filter((e) => e.type !== 'noise'),
   });
 
   /** 某个场景的时间窗里有没有冒出事件（判断误报用） */
@@ -230,6 +245,26 @@ function main() {
       '床架轻微吱呀（-58dB）没有变成"翻身"',
       eventsIn('bedCreak').length === 0,
       `该时间窗内 ${eventsIn('bedCreak').length} 条`,
+    ],
+    [
+      '咳嗽等可听声音被逐条记录，并用文字标出',
+      byType('noise').some((e) => e.soundLabel === '咳嗽声'),
+      `噪音 ${byType('noise').length} 条，标签 ${JSON.stringify(byType('noise').map((e) => e.soundLabel))}`,
+    ],
+    [
+      '空调/风扇持续噪音被记录，并标出「室内环境声」',
+      eventsIn('fan').some((e) => e.type === 'noise' && e.soundLabel === '室内环境声'),
+      `该时间窗内 ${eventsIn('fan').filter((e) => e.type === 'noise').length} 条噪音`,
+    ],
+    [
+      '环境噪音不拉低睡眠质量分',
+      withoutNoise.qualityScore === summary.qualityScore,
+      `${withoutNoise.qualityScore} vs ${summary.qualityScore}`,
+    ],
+    [
+      '环境噪音不占用片段音频预算',
+      byType('noise').every((e) => plan.offsets[events.indexOf(e)] < 0),
+      `噪音 ${byType('noise').length} 条均不裁剪音频`,
     ],
     [
       '翻身不影响睡眠质量分',

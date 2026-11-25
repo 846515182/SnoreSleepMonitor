@@ -108,6 +108,9 @@ export const CLIP_MERGE_GAP_MS = 400;
  *
  * 翻身也要留音频：用户想确认的往往正是"这一声到底是翻身还是别的东西"，
  * 只给次数不给声音，等于没法自查。
+ *
+ * 环境噪音（noise）不参与片段裁剪：整晚空调/风扇很容易吃满 45 分钟预算，
+ * 导致鼾声反而不够用；完整录音模式下仍可直接跳到该事件回放。
  */
 export const AUDIO_EVENT_TYPES: readonly SoundEventType[] = ['snore', 'talk', 'grind', 'turn'];
 

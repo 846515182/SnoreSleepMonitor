@@ -52,7 +52,8 @@ type Scene =
   | 'turnThump'
   | 'bedCreak'
   | 'talkShort'
-  | 'grindLong';
+  | 'grindLong'
+  | 'cough';
 
 /**
  * 单帧内容。
@@ -132,6 +133,11 @@ function frameAt(scene: Scene, i: number): FrameInput {
         confidences: { grinding: 0.62, snoring: 0.1 },
         amplitudeDb: i % 2 === 0 ? -44 : -48,
       };
+    case 'cough':
+      // 咳嗽：YAMNet 原始类别为 Cough，但聚合后不属于鼾声/梦话/磨牙/翻身
+      return i % 3 === 0
+        ? { topClass: 'noise', confidences: { noise: 0.8 }, amplitudeDb: -40, yamnetClass: 'Cough' }
+        : { topClass: 'noise', confidences: { noise: 0.55 }, amplitudeDb: -56 };
     case 'fan':
       return { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 };
     case 'quiet':
@@ -187,7 +193,7 @@ function runNight(frames: Frame[], minSilenceMs = 15_000, th: Thresholds = TH) {
   return { events, apneas, endTime: frames.length ? frames[frames.length - 1].t + FRAME_MS : 0 };
 }
 
-test('模拟一夜：打鼾 3 段 / 梦话 1 段 / 暂停 1 次 / 电视与稳态噪声不计', () => {
+test('模拟一夜：打鼾 3 段 / 梦话 1 段 / 暂停 1 次 / 电视不计，风扇声记成噪音', () => {
   const frames = buildNight([
     ['quiet', 60],
     ['snore', 40], // 鼾声 1
@@ -215,6 +221,7 @@ test('模拟一夜：打鼾 3 段 / 梦话 1 段 / 暂停 1 次 / 电视与稳�
   assert.equal(byType('snore').length, 3, '每段打鼾应只记 1 条，而不是每个呼吸周期一条');
   assert.equal(byType('talk').length, 1);
   assert.equal(byType('grind').length, 1);
+  assert.equal(byType('noise').length, 2, '稳态风扇与 -40dB 风扇声应各记一条环境噪音');
   assert.equal(apneas.length, 1, '15 秒无声且前后都有鼾声，应记一次疑似暂停');
 
   const snoreSeconds = byType('snore').reduce((sum, e) => sum + e.duration, 0) / 1000;
@@ -236,7 +243,7 @@ test('轻声打鼾（-46dB、置信度 0.58）仍然能记到', () => {
   assert.equal(events.filter((e) => e.type === 'snore').length, 1);
 });
 
-test('稳态噪声（风扇被判成 snoring、音量不变）一整晚 0 条', () => {
+test('稳态噪声（风扇被判成 snoring、音量不变）不记成打鼾，但逐段记为环境噪音', () => {
   const { events, apneas } = runNight(
     buildNight([
       ['steadyFan', 600],
@@ -244,7 +251,8 @@ test('稳态噪声（风扇被判成 snoring、音量不变）一整晚 0 条', 
       ['steadyFan', 600],
     ])
   );
-  assert.equal(events.length, 0, '没有呼吸包络的稳定声音不能记成打鼾');
+  assert.equal(events.filter((e) => e.type === 'snore').length, 0, '没有呼吸包络的稳定声音不能记成打鼾');
+  assert.ok(events.filter((e) => e.type === 'noise').length >= 2, '风扇声要作为环境噪音记录下来');
   assert.equal(apneas.length, 0);
 });
 
@@ -275,7 +283,7 @@ test('暂停判定：6 秒不算，15 秒算，90 秒（超上限）不算', () 
   assert.equal(scenario(90).length, 0, '超过 60 秒的安静是“没人/没录音”，不是呼吸暂停');
 });
 
-test('纯安静 + 风扇一整晚：0 事件、0 暂停', () => {
+test('纯安静 + 风扇一整晚：不误报打鼾，风扇声全部记成噪音', () => {
   const { events, apneas } = runNight(
     buildNight([
       ['quiet', 600],
@@ -283,7 +291,8 @@ test('纯安静 + 风扇一整晚：0 事件、0 暂停', () => {
       ['quiet', 600],
     ])
   );
-  assert.equal(events.length, 0);
+  assert.equal(events.filter((e) => e.type === 'snore').length, 0);
+  assert.ok(events.filter((e) => e.type === 'noise').length >= 1);
   assert.equal(apneas.length, 0);
 });
 
@@ -489,4 +498,11 @@ test('梦话与翻身同时发生（边说边动）：并成一条，按占比�
   );
   assert.equal(events.length, 1, `连续声音只应是一条事件，实际 ${events.map((e) => e.type)}`);
   assert.equal(events[0]?.type, 'talk', '梦话帧更多，应归到梦话');
+});
+
+test('咳嗽等未归类声音逐条记录，并用文字标出具体声音', () => {
+  const { events } = runNight(buildNight([['cough', 5]]));
+  const noises = events.filter((e) => e.type === 'noise');
+  assert.equal(noises.length, 1, `应只记一条咳嗽噪音，实际 ${events.map((e) => e.type + ':' + e.soundLabel)}`);
+  assert.equal(noises[0]?.soundLabel, '咳嗽声');
 });

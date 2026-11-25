@@ -56,16 +56,19 @@ export function summarizeSession(input: SummarizeInput): SleepSession {
   const talk = sumByType(input.events, 'talk');
   const apnea = sumByType(input.events, 'apnea');
   const turn = sumByType(input.events, 'turn');
+  const noise = sumByType(input.events, 'noise');
 
   const totalSnoreSeconds = Math.floor(snore.ms / 1000);
   const totalGrindSeconds = Math.floor(grind.ms / 1000);
   const totalTalkSeconds = Math.floor(talk.ms / 1000);
   const totalApneaSeconds = Math.floor(apnea.ms / 1000);
   const totalTurnSeconds = Math.floor(turn.ms / 1000);
+  const totalNoiseSeconds = Math.floor(noise.ms / 1000);
 
   // 质量分只吃「异常声音」：不含呼吸暂停（无声区间不是噪音），
-  // 也不含翻身（正常睡眠里整夜翻身 20–40 次，算进去会让评分永远失真）。
-  const totalNoiseSeconds = totalSnoreSeconds + totalGrindSeconds + totalTalkSeconds;
+  // 也不含翻身（正常睡眠里整夜翻身 20–40 次，算进去会让评分永远失真），
+  // 同样不含环境噪音（空调/风扇/交通是环境因素，只做记录与回放）。
+  const scoreNoiseSeconds = totalSnoreSeconds + totalGrindSeconds + totalTalkSeconds;
 
   const intensityBreakdown = {
     mild: input.events.filter((e) => e.type === 'snore' && e.intensity === 'mild').length,
@@ -88,14 +91,16 @@ export function summarizeSession(input: SummarizeInput): SleepSession {
     talkCount: talk.count,
     apneaCount: apnea.count,
     turnCount: turn.count,
+    noiseCount: noise.count,
     totalSnoreSeconds,
     totalGrindSeconds,
     totalTalkSeconds,
     totalApneaSeconds,
     totalTurnSeconds,
+    totalNoiseSeconds,
     recordingUri: input.recordingUri,
     recordingMode: input.recordingMode,
-    qualityScore: calculateQualityScore(durationSeconds, totalNoiseSeconds),
+    qualityScore: calculateQualityScore(durationSeconds, scoreNoiseSeconds),
     apneaRisk: computeRisk(ahi),
     intensityBreakdown,
     eventsTruncated: input.eventsTruncated,

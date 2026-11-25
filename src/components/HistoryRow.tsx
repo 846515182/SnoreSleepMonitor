@@ -15,7 +15,7 @@ interface HistoryRowProps {
   onPress: () => void;
 }
 
-/** 历史记录列表项：时间、时长、中断提示、五类计数徽标与质量/风险徽标 */
+/** 历史记录列表项：时间、时长、中断提示、六类计数徽标与质量/风险徽标 */
 export function HistoryRow({ session, T, styles, onPress }: HistoryRowProps) {
   const counts = [
     { icon: 'volume-high-outline', color: T.snoreText, value: session.snoreCount },
@@ -23,6 +23,7 @@ export function HistoryRow({ session, T, styles, onPress }: HistoryRowProps) {
     { icon: 'chatbubble-outline', color: T.talkText, value: session.talkCount },
     { icon: 'pulse-outline', color: T.apneaText, value: session.apneaCount },
     { icon: 'swap-horizontal-outline', color: T.turnText, value: session.turnCount ?? 0 },
+    { icon: 'volume-medium-outline', color: T.noiseText, value: session.noiseCount ?? 0 },
   ] as const;
 
   return (

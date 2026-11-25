@@ -8,7 +8,7 @@
  */
 
 import type { SoundEvent } from '../types';
-import { classifyFinalEvent, GRACE_MS, percentile } from './events';
+import { classifyFinalEvent, GRACE_MS, MAX_NOISE_MS, percentile } from './events';
 
 /**
  * 两帧之间超过这个间隔就认为中间断过（锁屏定时器被暂停、应用被冻结、
@@ -35,6 +35,7 @@ interface Draft {
   grindFrames: number;
   talkFrames: number;
   turnFrames: number;
+  noiseFrames: number;
   totalFrames: number;
   maxSnoreConf: number;
   /** 事件期间每一帧的音量（含换气停顿），用于算包络起伏 */
@@ -42,6 +43,22 @@ interface Draft {
   /** 连续的鼾声帧算一个回合 */
   bursts: number;
   lastWasSnore: boolean;
+  /** 最近一个「明确类型」帧（鼾声/磨牙/梦话/翻身）的时间；用于把尾随的连续噪音切开 */
+  lastTypedMs: number;
+  /** 噪音帧识别到的声音标签计数，事件结束时取出现最多的一个 */
+  labelCounts: Map<string, number>;
+}
+
+function topLabel(counts: Map<string, number>): string | undefined {
+  let best: string | undefined;
+  let bestCount = 0;
+  for (const [label, count] of counts) {
+    if (count > bestCount) {
+      best = label;
+      bestCount = count;
+    }
+  }
+  return best;
 }
 
 export interface DetectorFrame {
@@ -50,6 +67,10 @@ export interface DetectorFrame {
   talk: boolean;
   /** 翻身/床体噪声帧（可选：旧调用方不传时按 false 处理） */
   turn?: boolean;
+  /** 其他可听声音帧（裁剪到环境噪音事件） */
+  noise?: boolean;
+  /** YAMNet 原始类别映射出的中文标签，用于给噪音事件加文字说明 */
+  soundLabel?: string;
 }
 
 export class SoundEventDetector {
@@ -90,54 +111,85 @@ export class SoundEventDetector {
     const t = Math.max(elapsedMs, this.lastFrameMs);
     this.lastFrameMs = t;
 
-    const loud = frame.snore || frame.grind || frame.talk || frame.turn === true;
+    const typed = frame.snore || frame.grind || frame.talk || frame.turn === true;
+    const noise = frame.noise === true && !typed;
+    const loud = typed || noise;
     let finalized: SoundEvent | null = null;
 
-    if (loud) {
-      // 断帧太久：先结掉上一段，绝不能把空白并进来
-      if (this.draft && t - this.draft.end > MAX_FRAME_GAP_MS) {
-        finalized = this.finalize();
+    if (!loud) {
+      if (this.draft) {
+        // 换气/静音帧也是一个「响—停」回合的结束
+        this.draft.lastWasSnore = false;
+        // 静音帧也纳入包络统计（真人鼾声之间就是 1–2 秒的换气停顿）
+        pushDb(this.draft, db);
+        if (t - this.lastLoudMs >= GRACE_MS) {
+          finalized = this.finalize();
+        }
       }
-      this.lastLoudMs = t;
-      if (!this.draft) {
-        this.draft = {
-          start: t,
-          end: t,
-          snoreFrames: 0,
-          grindFrames: 0,
-          talkFrames: 0,
-          turnFrames: 0,
-          totalFrames: 0,
-          maxSnoreConf: 0,
-          dbs: [],
-          bursts: 0,
-          lastWasSnore: false,
-        };
-      }
+      return finalized;
+    }
+
+    // 断帧太久：先结掉上一段，绝不能把空白并进来
+    if (this.draft && t - this.draft.end > MAX_FRAME_GAP_MS) {
+      finalized = this.finalize();
+    }
+
+    /**
+     * 切段规则：
+     * 1. 任何连续声音段最长 MAX_NOISE_MS（1 小时），超出就切成新的一段。
+     *    风扇/空调这类被误判成鼾声的稳定声音不会变成横跨几小时的假事件；
+     *    几分钟的连续鼾声仍然保持一条，不会被切碎。
+     * 2. 明确类型的事件结束后只剩连续环境噪音时，最多再延长 GRACE_MS，
+     *    否则一条鼾声会被尾随底噪无限拉长，占比被稀释。
+     */
+    if (this.draft) {
       const d = this.draft;
-      d.end = t;
-      d.totalFrames += 1;
-      pushDb(d, db);
-      if (frame.snore) {
-        d.snoreFrames += 1;
-        if (snoreConf > d.maxSnoreConf) d.maxSnoreConf = snoreConf;
-        if (!d.lastWasSnore) d.bursts += 1;
-        d.lastWasSnore = true;
-      } else {
-        d.lastWasSnore = false;
-      }
-      if (frame.grind) d.grindFrames += 1;
-      if (frame.talk) d.talkFrames += 1;
-      if (frame.turn) d.turnFrames += 1;
-    } else if (this.draft) {
-      // 换气/静音帧也是一个「响—停」回合的结束
-      this.draft.lastWasSnore = false;
-      // 静音帧也纳入包络统计（真人鼾声之间就是 1–2 秒的换气停顿）
-      pushDb(this.draft, db);
-      if (t - this.lastLoudMs >= GRACE_MS) {
+      const hasTyped = d.totalFrames - d.noiseFrames > 0;
+      if (t - d.start >= MAX_NOISE_MS) {
+        finalized = this.finalize();
+      } else if (hasTyped && noise && t - d.lastTypedMs >= GRACE_MS) {
         finalized = this.finalize();
       }
     }
+
+    this.lastLoudMs = t;
+    if (!this.draft) {
+      this.draft = {
+        start: t,
+        end: t,
+        snoreFrames: 0,
+        grindFrames: 0,
+        talkFrames: 0,
+        turnFrames: 0,
+        noiseFrames: 0,
+        totalFrames: 0,
+        maxSnoreConf: 0,
+        dbs: [],
+        bursts: 0,
+        lastWasSnore: false,
+        lastTypedMs: t,
+        labelCounts: new Map(),
+      };
+    }
+    const d = this.draft;
+    d.end = t;
+    d.totalFrames += 1;
+    pushDb(d, db);
+    if (typed) d.lastTypedMs = t;
+    if (frame.snore) {
+      d.snoreFrames += 1;
+      if (snoreConf > d.maxSnoreConf) d.maxSnoreConf = snoreConf;
+      if (!d.lastWasSnore) d.bursts += 1;
+      d.lastWasSnore = true;
+    } else {
+      d.lastWasSnore = false;
+    }
+    if (frame.grind) d.grindFrames += 1;
+    if (frame.talk) d.talkFrames += 1;
+    if (frame.turn) d.turnFrames += 1;
+    if (noise) d.noiseFrames += 1;
+    const label = frame.soundLabel?.trim();
+    if (label) d.labelCounts.set(label, (d.labelCounts.get(label) ?? 0) + 1);
 
     return finalized;
   }
@@ -160,6 +212,7 @@ export class SoundEventDetector {
         grind: d.grindFrames,
         talk: d.talkFrames,
         turn: d.turnFrames,
+        noise: d.noiseFrames,
         total: d.totalFrames,
       },
       d.maxSnoreConf,
@@ -170,12 +223,17 @@ export class SoundEventDetector {
     );
     if (!classified) return null;
 
-    return {
+    const event: SoundEvent = {
       start: d.start,
       end: d.end,
       duration,
       type: classified.type,
       intensity: classified.intensity,
     };
+    if (classified.type === 'noise') {
+      const label = topLabel(d.labelCounts);
+      if (label) event.soundLabel = label;
+    }
+    return event;
   }
 }

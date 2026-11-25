@@ -9,7 +9,7 @@ import {
   SNORE_MIN_DB,
   TURN_MIN_DB,
 } from '../frame';
-import type { Thresholds } from '../frame';
+import type { FrameInput, Thresholds } from '../frame';
 
 const TH: Thresholds = {
   snore: DEFAULT_SNORE_CONFIDENCE,
@@ -100,24 +100,29 @@ test('梦话要求 top 为 talking 且过阈值', () => {
   );
 });
 
-test('异常呼吸音只用于收口暂停，不单独计事件', () => {
+test('异常呼吸音用于收口暂停，同时作为可听声音记录', () => {
   const flags = classifyFrame(
     { topClass: 'apnea', confidences: { apnea: 0.5, noise: 0.2 }, amplitudeDb: -45 },
     TH
   );
   assert.equal(flags.apneaSound, true);
   assert.equal(flags.breath, true);
-  assert.equal(flags.loud, false, '喘息本身不该被记成鼾声/梦话事件');
+  assert.equal(flags.noise, true, '喘息/喘鸣是真实存在的声音，应进入噪音记录');
+  assert.equal(flags.loud, true);
 });
 
-test('风扇、安静呼吸不产生事件；翻身只归到翻身，不会被记成鼾声/梦话', () => {
+test('所有可听声音都记录：风扇/呼吸声归为噪音，安静帧不记录', () => {
+  const quietFlags = classifyFrame(quiet, TH);
+  assert.equal(quietFlags.loud, false, '低于 -52dB 的房间底噪不应刷屏');
+  assert.equal(quietFlags.noise, false);
+
   for (const f of [
-    quiet,
     { topClass: 'noise', confidences: { noise: 0.9, snoring: 0.12 }, amplitudeDb: -40 },
     { topClass: 'breathing', confidences: { breathing: 0.7, snoring: 0.2 }, amplitudeDb: -48 },
-  ]) {
+  ] as FrameInput[]) {
     const flags = classifyFrame(f, TH);
-    assert.equal(flags.loud, false);
+    assert.equal(flags.noise, true, '不属于四类事件的 audible 声音要记录为环境噪音');
+    assert.equal(flags.loud, true);
     assert.equal(flags.snore, false);
     assert.equal(flags.grind, false);
     assert.equal(flags.talk, false);
@@ -130,6 +135,7 @@ test('风扇、安静呼吸不产生事件；翻身只归到翻身，不会被�
     TH
   );
   assert.equal(turn.turn, true);
+  assert.equal(turn.noise, false, '翻身已有专属类别，不再重复记成噪音');
   assert.equal(turn.snore, false, '翻身不能被记成打鼾');
   assert.equal(turn.talk, false);
   assert.equal(turn.grind, false);
@@ -154,4 +160,34 @@ test('风扇、安静呼吸不产生事件；翻身只归到翻身，不会被�
       .turn,
     false
   );
+});
+
+test('噪音帧用 YAMNet 原始类别生成中文文字标签', () => {
+  const cough = classifyFrame(
+    { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -40, yamnetClass: 'Cough' },
+    TH
+  );
+  assert.equal(cough.noise, true);
+  assert.equal(cough.soundLabel, '咳嗽声');
+
+  const dog = classifyFrame(
+    { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -40, yamnetClass: 'Bark' },
+    TH
+  );
+  assert.equal(dog.soundLabel, '狗叫声');
+
+  // 未收录的类别不硬翻，界面回退为「环境噪音」
+  const unknown = classifyFrame(
+    { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -40, yamnetClass: 'Zzz' },
+    TH
+  );
+  assert.equal(unknown.soundLabel, undefined);
+
+  // 音量不够时不产生噪音帧，标签也不应出现
+  const quietCough = classifyFrame(
+    { topClass: 'noise', confidences: { noise: 0.9 }, amplitudeDb: -55, yamnetClass: 'Cough' },
+    TH
+  );
+  assert.equal(quietCough.noise, false);
+  assert.equal(quietCough.soundLabel, undefined);
 });
